@@ -21,7 +21,6 @@ from mlflow import pyfunc
 from mlflow.models import Model
 from mlflow.models.model import MLMODEL_FILE_NAME
 from mlflow.models.signature import ModelSignature
-from mlflow.models.signature import infer_signature
 from mlflow.models.utils import ModelInputExample, _save_example
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
@@ -276,10 +275,10 @@ def load_model(self, model_uri):
     local_model_path = _download_artifact_from_uri(artifact_uri=model_uri)
     flavor_conf = _get_flavor_configuration(model_path=local_model_path, flavor_name=self.FLAVOR_NAME)
     tflite_model_file_path = os.path.join(local_model_path, flavor_conf.get("data", "model.tflite"))
-    return _load_tflite_model(path=tflite_model_file_path)
+    return _load_model(path=tflite_model_file_path)
 
 
-def _load_tflite_model(model_path):
+def _load_model(model_path):
     """
     Load a specified TensorFlow model from model path and return instance of tensorflow.lite.Interpreter
     """
@@ -304,8 +303,8 @@ class _TFLiteInterpreterWrapper(tensorflow.lite.Interpreter):
     ``predict(data: numpy.array) -> numpy.array``.
     '''
 
-    def __init__(self, model_path=None, model_content=None, experimental_delegates=None, num_threads=None):
-        super(_TFLiteInterpreterWrapper, self).__init__(model_path, model_content, experimental_delegates, num_threads)
+    def __init__(self, model_path=None, model_content=None, **kwargs):
+        super(_TFLiteInterpreterWrapper, self).__init__(model_path, model_content, **kwargs)
         self.allocate_tensors()
         input_details = self.get_input_details()
         output_details = self.get_output_details()
@@ -315,7 +314,7 @@ class _TFLiteInterpreterWrapper(tensorflow.lite.Interpreter):
     def predict(self, data):
         target_shape = self.get_input_details()[0]['shape']
 
-        if isinstance(data, numpy.array):
+        if isinstance(data, numpy.ndarray):
             if (data.shape == target_shape).all():
                 pass
             else:

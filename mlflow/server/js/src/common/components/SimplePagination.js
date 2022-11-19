@@ -1,10 +1,6 @@
 import React from 'react';
 import PropTypes from 'prop-types';
-import { Button, Dropdown, Icon, Menu } from 'antd';
-import { css } from 'emotion';
-import { FormattedMessage } from 'react-intl';
-
-const ButtonGroup = Button.Group;
+import { Pagination } from '@databricks/design-system';
 
 export class SimplePagination extends React.Component {
   static propTypes = {
@@ -12,85 +8,58 @@ export class SimplePagination extends React.Component {
     isLastPage: PropTypes.bool.isRequired,
     onClickNext: PropTypes.func.isRequired,
     onClickPrev: PropTypes.func.isRequired,
-    loading: PropTypes.bool,
     maxResultOptions: PropTypes.array,
     handleSetMaxResult: PropTypes.func,
-    getSelectedPerPageSelection: PropTypes.func,
+    getSelectedPerPageSelection: PropTypes.func.isRequired,
   };
 
-  constructDropdown() {
-    return (
-      <Menu
-        className={`pagination-dropdown ${classNames.paginationDropdownMenuWrapper}`}
-        onClick={this.props.handleSetMaxResult}
-      >
-        {this.props.maxResultOptions.map((num_models) => (
-          <Menu.Item key={num_models.toString()} title={num_models.toString()}>
-            {num_models}
-          </Menu.Item>
-        ))}
-      </Menu>
-    );
-  }
-
   render() {
-    const { currentPage, isLastPage, onClickNext, onClickPrev } = this.props;
+    const { currentPage, isLastPage, onClickNext, onClickPrev, maxResultOptions } = this.props;
+    const numEntries = this.props.getSelectedPerPageSelection();
+    let total;
+
+    // This is necessary because for tables using this component, we do not know the total records.
+    // Thus this is a proxy to determine whether or not the "next" button should be disabled ==>
+    // if it's the last page, we set total = max number of entries, else we add 1 page more than
+    // the current page.
+    if (isLastPage) {
+      total = currentPage * numEntries;
+    } else {
+      total = (currentPage + 1) * numEntries;
+    }
+
     return (
-      <div className={`pagination-section ${classNames.wrapper}`}>
-        <ButtonGroup>
-          <Button
-            disabled={currentPage === 1}
-            className='prev-page-btn'
-            onClick={onClickPrev}
-            size='small'
-            type='link'
-          >
-            <Icon type='left' />
-          </Button>
-          <span>
-            <FormattedMessage
-              defaultMessage='Page {currentPage}'
-              description='Text for page number for pagination in MLflow'
-              values={{ currentPage: currentPage }}
-            />
-          </span>
-          <Button
-            disabled={isLastPage}
-            className='next-page-btn'
-            onClick={onClickNext}
-            size='small'
-            type='link'
-          >
-            <Icon type='right' />
-          </Button>
-          {this.props.maxResultOptions ? (
-            <Dropdown disabled={this.props.loading} overlay={this.constructDropdown()}>
-              <Button>
-                <span>
-                  <FormattedMessage
-                    defaultMessage='{numEntries} / page'
-                    description='Text for number of entries in pagination in MLflow'
-                    values={{ numEntries: this.props.getSelectedPerPageSelection() }}
-                  />{' '}
-                  <Icon type='down' />
-                </span>
-              </Button>
-            </Dropdown>
-          ) : null}
-        </ButtonGroup>
+      <div className='pagination-section' css={[classNames.wrapper, classNames.paginationOverride]}>
+        <Pagination
+          currentPageIndex={currentPage}
+          numTotal={total}
+          onChange={(nextPage) => (nextPage > currentPage ? onClickNext() : onClickPrev())}
+          dangerouslySetAntdProps={{
+            showQuickJumper: false,
+            showSizeChanger: true,
+            pageSize: numEntries,
+            pageSizeOptions: maxResultOptions,
+            onShowSizeChange: (current, size) => this.props.handleSetMaxResult({ key: size }),
+          }}
+        />
       </div>
     );
   }
 }
 
 const classNames = {
-  wrapper: css({
+  wrapper: {
     textAlign: 'right',
     paddingBottom: 30,
-  }),
-  paginationDropdownMenuWrapper: css({
-    '.ant-dropdown-menu-item': {
-      textAlign: 'center',
+  },
+  paginationOverride: {
+    // Hide extra page buttons
+    '.du-bois-light-pagination-item:not(.du-bois-light-pagination-item-active)': {
+      display: 'none',
     },
-  }),
+    // Hide jump buttons
+    '.du-bois-light-pagination-jump-prev': {
+      display: 'none',
+    },
+  },
 };

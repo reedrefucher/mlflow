@@ -16,7 +16,7 @@ from sqlalchemy import (
     BigInteger,
     PrimaryKeyConstraint,
 )
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
@@ -117,6 +117,10 @@ class SqlRun(Base):
     end_time = Column(BigInteger, nullable=True, default=None)
     """
     Run end time: `BigInteger`.
+    """
+    deleted_time = Column(BigInteger, nullable=True, default=None)
+    """
+    Run deleted time: `BigInteger`. Timestamp of when run is deleted, defaults to none.
     """
     source_version = Column(String(50))
     """

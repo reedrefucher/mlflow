@@ -6,16 +6,17 @@ import inspect
 import os
 import pytest
 from collections import namedtuple
+from contextlib import nullcontext as does_not_raise
 from unittest import mock
 
 import mlflow
-import mlflow.utils.autologging_utils as autologging_utils
+from mlflow.utils import autologging_utils
 from mlflow.entities import RunStatus
-from mlflow.tracking.client import MlflowClient
+from mlflow import MlflowClient
 from mlflow.utils.autologging_utils import (
     safe_patch,
     autologging_integration,
-    exception_safe_function,
+    picklable_exception_safe_function,
     AutologgingEventLogger,
     ExceptionSafeClass,
     ExceptionSafeAbstractClass,
@@ -27,14 +28,13 @@ from mlflow.utils.autologging_utils.safety import (
     _AutologgingSessionManager,
     _validate_args,
     _validate_autologging_run,
+    ValidationExemptArgument,
 )
 from mlflow.utils.mlflow_tags import MLFLOW_AUTOLOGGING
 
 from tests.autologging.fixtures import test_mode_off, test_mode_on
 from tests.autologging.fixtures import patch_destination  # pylint: disable=unused-import
 from tests.autologging.test_autologging_utils import get_func_attrs
-
-pytestmark = pytest.mark.large
 
 
 PATCH_DESTINATION_FN_DEFAULT_RESULT = "original_result"
@@ -146,8 +146,8 @@ class MockEventLogger(AutologgingEventLogger):
 
 @pytest.fixture
 def mock_event_logger():
+    prev_logger = AutologgingEventLogger.get_logger()
     try:
-        prev_logger = AutologgingEventLogger.get_logger()
         logger = MockEventLogger()
         AutologgingEventLogger.set_logger(logger)
         yield logger
@@ -156,8 +156,8 @@ def mock_event_logger():
 
 
 def test_is_testing_respects_environment_variable():
+    prev_env_var_value = os.environ.pop("MLFLOW_AUTOLOGGING_TESTING", None)
     try:
-        prev_env_var_value = os.environ.pop("MLFLOW_AUTOLOGGING_TESTING", None)
         assert not is_testing()
 
         os.environ["MLFLOW_AUTOLOGGING_TESTING"] = "false"
@@ -282,7 +282,7 @@ def test_safe_patch_propagates_exceptions_raised_from_original_function(
 
     safe_patch(test_autologging_integration, patch_destination, "fn", patch_impl)
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(Exception, match=str(exc_to_throw)) as exc:
         patch_destination.fn()
 
     assert exc.value == exc_to_throw
@@ -319,7 +319,7 @@ def test_safe_patch_propagates_exceptions_raised_outside_of_original_function_in
         raise exc_to_throw
 
     safe_patch(test_autologging_integration, patch_destination, "fn", patch_impl)
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(Exception, match=str(exc_to_throw)) as exc:
         patch_destination.fn()
 
     assert exc.value == exc_to_throw
@@ -482,7 +482,7 @@ def test_safe_patch_validates_autologging_runs_when_necessary_in_test_mode(
             AssertionError, match="failed to set autologging tag with expected value"
         ):
             patch_destination.fn()
-            assert validate_run_mock.call_count == 1
+        assert validate_run_mock.call_count == 1
 
         validate_run_mock.reset_mock()
 
@@ -490,7 +490,7 @@ def test_safe_patch_validates_autologging_runs_when_necessary_in_test_mode(
             # If a user-generated run existed prior to the autologged training session, we expect
             # that safe patch will not attempt to validate it
             patch_destination.fn()
-            assert not validate_run_mock.called
+        assert not validate_run_mock.called
 
 
 def test_safe_patch_does_not_validate_autologging_runs_in_standard_mode(
@@ -610,14 +610,16 @@ def test_safe_patch_provides_original_function_with_expected_signature(
 
 
 def test_safe_patch_makes_expected_event_logging_calls_for_successful_patch_invocation(
-    patch_destination, test_autologging_integration, mock_event_logger,
+    patch_destination,
+    test_autologging_integration,
+    mock_event_logger,
 ):
     patch_session = None
     og_call_kwargs = {}
 
     def patch_impl(original, *args, **kwargs):
         nonlocal og_call_kwargs
-        kwargs.update({"extra_func": exception_safe_function(lambda k: "foo")})
+        kwargs.update({"extra_func": picklable_exception_safe_function(lambda k: "foo")})
         og_call_kwargs = kwargs
 
         nonlocal patch_session
@@ -630,9 +632,9 @@ def test_safe_patch_makes_expected_event_logging_calls_for_successful_patch_invo
     patch_destination.fn("a", 1, b=2)
     expected_order = ["patch_start", "original_start", "original_success", "patch_success"]
     assert [call.method for call in mock_event_logger.calls] == expected_order
-    assert all([call.session == patch_session for call in mock_event_logger.calls])
-    assert all([call.patch_obj == patch_destination for call in mock_event_logger.calls])
-    assert all([call.function_name == "fn" for call in mock_event_logger.calls])
+    assert all(call.session == patch_session for call in mock_event_logger.calls)
+    assert all(call.patch_obj == patch_destination for call in mock_event_logger.calls)
+    assert all(call.function_name == "fn" for call in mock_event_logger.calls)
     patch_start, original_start, original_success, patch_success = mock_event_logger.calls
     assert patch_start.call_args == patch_success.call_args == ("a", 1)
     assert patch_start.call_kwargs == patch_success.call_kwargs == {"b": 2}
@@ -642,8 +644,10 @@ def test_safe_patch_makes_expected_event_logging_calls_for_successful_patch_invo
     assert patch_success.exception is original_success.exception is None
 
 
-def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation_throws_and_original_succeeds(  # noqa
-    patch_destination, test_autologging_integration, mock_event_logger,
+def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation_throws_and_original_succeeds(  # pylint: disable=line-too-long
+    patch_destination,
+    test_autologging_integration,
+    mock_event_logger,
 ):
     exc_to_raise = Exception("thrown from patch")
 
@@ -680,8 +684,10 @@ def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation
         assert patch_error.exception == exc_to_raise
 
 
-def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation_throws_and_original_throws(  # noqa
-    patch_destination, test_autologging_integration, mock_event_logger,
+def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation_throws_and_original_throws(  # pylint: disable=line-too-long
+    patch_destination,
+    test_autologging_integration,
+    mock_event_logger,
 ):
     exc_to_raise = Exception("thrown from patch")
     original_err_to_raise = Exception("throw from original")
@@ -715,7 +721,9 @@ def test_safe_patch_makes_expected_event_logging_calls_when_patch_implementation
 
 
 def test_safe_patch_makes_expected_event_logging_calls_when_original_function_throws(
-    patch_destination, test_autologging_integration, mock_event_logger,
+    patch_destination,
+    test_autologging_integration,
+    mock_event_logger,
 ):
     exc_to_raise = Exception("thrown from patch")
 
@@ -740,7 +748,8 @@ def test_safe_patch_makes_expected_event_logging_calls_when_original_function_th
 
 @pytest.mark.usefixtures(test_mode_off.__name__)
 def test_safe_patch_succeeds_when_event_logging_throws_in_standard_mode(
-    patch_destination, test_autologging_integration,
+    patch_destination,
+    test_autologging_integration,
 ):
     patch_preamble_called = False
     patch_postamble_called = False
@@ -812,10 +821,10 @@ def test_safe_patch_succeeds_when_event_logging_throws_in_standard_mode(
     assert [call.method for call in logger.calls] == expected_calls
 
 
-def test_exception_safe_function_exhibits_expected_behavior_in_standard_mode():
+def test_picklable_exception_safe_function_exhibits_expected_behavior_in_standard_mode():
     assert not autologging_utils.is_testing()
 
-    @exception_safe_function
+    @picklable_exception_safe_function
     def non_throwing_function():
         return 10
 
@@ -823,7 +832,7 @@ def test_exception_safe_function_exhibits_expected_behavior_in_standard_mode():
 
     exc_to_throw = Exception("bad implementation")
 
-    @exception_safe_function
+    @picklable_exception_safe_function
     def throwing_function():
         raise exc_to_throw
 
@@ -836,10 +845,10 @@ def test_exception_safe_function_exhibits_expected_behavior_in_standard_mode():
 
 
 @pytest.mark.usefixtures(test_mode_on.__name__)
-def test_exception_safe_function_exhibits_expected_behavior_in_test_mode():
+def test_picklable_exception_safe_function_exhibits_expected_behavior_in_test_mode():
     assert autologging_utils.is_testing()
 
-    @exception_safe_function
+    @picklable_exception_safe_function
     def non_throwing_function():
         return 10
 
@@ -847,18 +856,19 @@ def test_exception_safe_function_exhibits_expected_behavior_in_test_mode():
 
     exc_to_throw = Exception("function error")
 
-    @exception_safe_function
+    @picklable_exception_safe_function
     def throwing_function():
         raise exc_to_throw
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(Exception, match=str(exc_to_throw)) as exc:
         throwing_function()
 
     assert exc.value == exc_to_throw
 
 
 @pytest.mark.parametrize(
-    "baseclass, metaclass", [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)]
+    ("baseclass", "metaclass"),
+    [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)],
 )
 def test_exception_safe_class_exhibits_expected_behavior_in_standard_mode(baseclass, metaclass):
     assert not autologging_utils.is_testing()
@@ -887,7 +897,8 @@ def test_exception_safe_class_exhibits_expected_behavior_in_standard_mode(basecl
 
 @pytest.mark.usefixtures(test_mode_on.__name__)
 @pytest.mark.parametrize(
-    "baseclass, metaclass", [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)]
+    ("baseclass", "metaclass"),
+    [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)],
 )
 def test_exception_safe_class_exhibits_expected_behavior_in_test_mode(baseclass, metaclass):
     assert autologging_utils.is_testing()
@@ -904,7 +915,7 @@ def test_exception_safe_class_exhibits_expected_behavior_in_test_mode(baseclass,
         def function(self):
             raise exc_to_throw
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(Exception, match=str(exc_to_throw)) as exc:
         ThrowingClass().function()
 
     assert exc.value == exc_to_throw
@@ -989,20 +1000,20 @@ def test_with_managed_run_with_throwing_function_exhibits_expected_behavior():
 
     patch_function = with_managed_run("test_integration", patch_function)
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="bad implementation"):
         patch_function(lambda: "foo")
 
     assert patch_function_active_run is not None
     status1 = client.get_run(patch_function_active_run.info.run_id).info.status
     assert RunStatus.from_string(status1) == RunStatus.FAILED
 
-    with mlflow.start_run() as active_run, pytest.raises(Exception):
+    with mlflow.start_run() as active_run, pytest.raises(Exception, match="bad implementation"):
         patch_function(lambda: "foo")
-        assert patch_function_active_run == active_run
-        # `with_managed_run` should not terminate a preexisting MLflow run,
-        # even if the patch function throws
-        status2 = client.get_run(active_run.info.run_id).info.status
-        assert RunStatus.from_string(status2) == RunStatus.FINISHED
+    assert patch_function_active_run == active_run
+    # `with_managed_run` should not terminate a preexisting MLflow run,
+    # even if the patch function throws
+    status2 = client.get_run(active_run.info.run_id).info.status
+    assert RunStatus.from_string(status2) == RunStatus.FINISHED
 
 
 def test_with_managed_run_with_non_throwing_class_exhibits_expected_behavior():
@@ -1044,20 +1055,20 @@ def test_with_managed_run_with_throwing_class_exhibits_expected_behavior():
 
     TestPatch = with_managed_run("test_integration", TestPatch)
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="bad implementation"):
         TestPatch.call(lambda: "foo")
 
     assert patch_function_active_run is not None
     status1 = client.get_run(patch_function_active_run.info.run_id).info.status
     assert RunStatus.from_string(status1) == RunStatus.FAILED
 
-    with mlflow.start_run() as active_run, pytest.raises(Exception):
+    with mlflow.start_run() as active_run, pytest.raises(Exception, match="bad implementation"):
         TestPatch.call(lambda: "foo")
-        assert patch_function_active_run == active_run
-        # `with_managed_run` should not terminate a preexisting MLflow run,
-        # even if the patch function throws
-        status2 = client.get_run(active_run.info.run_id).info.status
-        assert RunStatus.from_string(status2) == RunStatus.FINISHED
+    assert patch_function_active_run == active_run
+    # `with_managed_run` should not terminate a preexisting MLflow run,
+    # even if the patch function throws
+    status2 = client.get_run(active_run.info.run_id).info.status
+    assert RunStatus.from_string(status2) == RunStatus.FINISHED
 
 
 def test_with_managed_run_sets_specified_run_tags():
@@ -1099,7 +1110,7 @@ def test_with_managed_run_ends_run_on_keyboard_interrupt():
         "test_integration", lambda original, *args, **kwargs: original(*args, **kwargs)
     )
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt, match=""):
         patch_function_1(original)
 
     assert not mlflow.active_run()
@@ -1115,7 +1126,7 @@ def test_with_managed_run_ends_run_on_keyboard_interrupt():
 
     patch_function_2 = with_managed_run("test_integration", PatchFunction2)
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt, match=""):
 
         patch_function_2.call(original)
 
@@ -1132,16 +1143,18 @@ def test_validate_args_succeeds_when_arg_sets_are_equivalent_or_identical():
         "biz": {"baz": 5},
     }
 
-    _validate_args(args, kwargs, args, kwargs)
-    _validate_args(args, None, args, None)
-    _validate_args(None, kwargs, None, kwargs)
+    _validate_args("autologging_integration_name", "function_name", args, kwargs, args, kwargs)
+    _validate_args("autologging_integration_name", "function_name", args, {}, args, {})
+    _validate_args("autologging_integration_name", "function_name", (), kwargs, (), kwargs)
 
     args_copy = copy.deepcopy(args)
     kwargs_copy = copy.deepcopy(kwargs)
 
-    _validate_args(args, kwargs, args_copy, kwargs_copy)
-    _validate_args(args, None, args_copy, None)
-    _validate_args(None, kwargs, None, kwargs_copy)
+    _validate_args(
+        "autologging_integration_name", "function_name", args, kwargs, args_copy, kwargs_copy
+    )
+    _validate_args("autologging_integration_name", "function_name", args, {}, args_copy, {})
+    _validate_args("autologging_integration_name", "function_name", (), kwargs, (), kwargs_copy)
 
 
 @pytest.mark.usefixtures(test_mode_on.__name__)
@@ -1159,12 +1172,22 @@ def test_validate_args_throws_when_extra_args_are_not_functions_classes_or_lists
 
     with pytest.raises(Exception, match="Invalid new input"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_type_autologging_call_args, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_type_autologging_call_args,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="Invalid new input"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_type_autologging_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_type_autologging_call_kwargs,
         )
 
 
@@ -1186,12 +1209,22 @@ def test_validate_args_throws_when_extra_args_are_not_exception_safe():
 
     with pytest.raises(Exception, match="not exception-safe"):
         _validate_args(
-            user_call_args, user_call_kwargs, unsafe_autologging_call_args, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            unsafe_autologging_call_args,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="Invalid new input"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, unsafe_autologging_call_kwargs1
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            unsafe_autologging_call_kwargs1,
         )
 
     unsafe_autologging_call_kwargs2 = copy.deepcopy(user_call_kwargs)
@@ -1199,15 +1232,21 @@ def test_validate_args_throws_when_extra_args_are_not_exception_safe():
 
     with pytest.raises(Exception, match="Invalid new input"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, unsafe_autologging_call_kwargs2
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            unsafe_autologging_call_kwargs2,
         )
 
 
 @pytest.mark.usefixtures(test_mode_on.__name__)
 @pytest.mark.parametrize(
-    "baseclass, metaclass", [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)]
+    ("baseclass", "metaclass"),
+    [(object, ExceptionSafeClass), (abc.ABC, ExceptionSafeAbstractClass)],
 )
-def test_validate_args_succeeds_when_extra_args_are_exception_safe_functions_or_classes(
+def test_validate_args_succeeds_when_extra_args_are_picklable_exception_safe_functions_or_classes(
     baseclass, metaclass
 ):
     user_call_args = (1, "b", ["c"])
@@ -1220,13 +1259,20 @@ def test_validate_args_succeeds_when_extra_args_are_exception_safe_functions_or_
 
     autologging_call_args = copy.deepcopy(user_call_args)
     autologging_call_args[2].append(Safe())
-    autologging_call_args += (exception_safe_function(lambda: "foo"),)
+    autologging_call_args += (picklable_exception_safe_function(lambda: "foo"),)
 
     autologging_call_kwargs = copy.deepcopy(user_call_kwargs)
-    autologging_call_kwargs["foo"].append(exception_safe_function(lambda: "foo"))
+    autologging_call_kwargs["foo"].append(picklable_exception_safe_function(lambda: "foo"))
     autologging_call_kwargs["new"] = Safe()
 
-    _validate_args(user_call_args, user_call_kwargs, autologging_call_args, autologging_call_kwargs)
+    _validate_args(
+        "autologging_integration_name",
+        "function_name",
+        user_call_args,
+        user_call_kwargs,
+        autologging_call_args,
+        autologging_call_kwargs,
+    )
 
 
 @pytest.mark.usefixtures(test_mode_on.__name__)
@@ -1244,12 +1290,22 @@ def test_validate_args_throws_when_args_are_omitted():
 
     with pytest.raises(Exception, match="missing from the call"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_autologging_call_args_1, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_autologging_call_args_1,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="missing from the call"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_autologging_call_kwargs_1
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_autologging_call_kwargs_1,
         )
 
     invalid_autologging_call_args_2 = copy.deepcopy(user_call_args)[1:]
@@ -1258,12 +1314,22 @@ def test_validate_args_throws_when_args_are_omitted():
 
     with pytest.raises(Exception, match="missing from the call"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_autologging_call_args_2, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_autologging_call_args_2,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="omit one or more expected keys"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_autologging_call_kwargs_2
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_autologging_call_kwargs_2,
         )
 
     invalid_autologging_call_args_3 = copy.deepcopy(user_call_args)
@@ -1273,12 +1339,22 @@ def test_validate_args_throws_when_args_are_omitted():
 
     with pytest.raises(Exception, match="omit one or more expected keys"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_autologging_call_args_3, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_autologging_call_args_3,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="omit one or more expected keys"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_autologging_call_kwargs_3
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_autologging_call_kwargs_3,
         )
 
 
@@ -1296,12 +1372,22 @@ def test_validate_args_throws_when_arg_types_or_values_are_changed():
 
     with pytest.raises(Exception, match="does not match expected input"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_autologging_call_args_1, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_autologging_call_args_1,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="does not match expected input"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_autologging_call_kwargs_1
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_autologging_call_kwargs_1,
         )
 
     call_arg_1, call_arg_2, _ = copy.deepcopy(user_call_args)
@@ -1311,13 +1397,137 @@ def test_validate_args_throws_when_arg_types_or_values_are_changed():
 
     with pytest.raises(Exception, match="does not match expected type"):
         _validate_args(
-            user_call_args, user_call_kwargs, invalid_autologging_call_args_2, user_call_kwargs
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            invalid_autologging_call_args_2,
+            user_call_kwargs,
         )
 
     with pytest.raises(Exception, match="does not match expected type"):
         _validate_args(
-            user_call_args, user_call_kwargs, user_call_args, invalid_autologging_call_kwargs_2
+            "autologging_integration_name",
+            "function_name",
+            user_call_args,
+            user_call_kwargs,
+            user_call_args,
+            invalid_autologging_call_kwargs_2,
         )
+
+
+@pytest.mark.usefixtures(test_mode_on.__name__)
+@mock.patch(
+    "mlflow.utils.autologging_utils.safety._VALIDATION_EXEMPT_ARGUMENTS",
+    [
+        ValidationExemptArgument("foo", "fit", lambda x: isinstance(x, int), 1, "x"),
+        ValidationExemptArgument("ml", "flow", lambda z: isinstance(z, list), 0, "cool"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("expectation", "al_name", "func_name", "user_args", "user_kwargs", "al_args", "al_kwargs"),
+    [
+        (
+            does_not_raise(),
+            "foo",
+            "fit",
+            (
+                None,
+                3,
+            ),
+            {},
+            (
+                None,
+                4,
+            ),
+            {},
+        ),
+        (does_not_raise(), "foo", "fit", (), {"x": 3}, (), {"x": 4}),
+        (
+            pytest.raises(AssertionError, match="does not match expected input"),
+            "foo",
+            "fit",
+            (None, None, 3),
+            {},
+            (
+                None,
+                None,
+                4,
+            ),
+            {},
+        ),
+        (
+            pytest.raises(AssertionError, match="does not match expected input"),
+            "foo",
+            "fit",
+            (),
+            {"y": 3},
+            (),
+            {"y": 4},
+        ),
+        (
+            pytest.raises(AssertionError, match="does not match expected input"),
+            "foo2",
+            "fit",
+            (),
+            {"x": 3},
+            (),
+            {"x": 4},
+        ),
+        (
+            pytest.raises(AssertionError, match="does not match expected input"),
+            "foo",
+            "fit2",
+            (),
+            {"x": 3},
+            (),
+            {"x": 4},
+        ),
+        (
+            pytest.raises(AssertionError, match="does not match expected type"),
+            "foo",
+            "fit",
+            (),
+            {"x": [1, 2]},
+            (),
+            {"x": 4},
+        ),
+        (
+            pytest.raises(AssertionError, match="does not match expected type"),
+            "foo",
+            "bar",
+            (1,),
+            {},
+            (None,),
+            {},
+        ),
+        (
+            pytest.raises(AssertionError, match="Invalid new input"),
+            "foo",
+            "bar",
+            (None,),
+            {},
+            (2,),
+            {},
+        ),
+        (does_not_raise(), "ml", "flow", ([1, 2, 3],), {}, ([2],), {}),
+        (does_not_raise(), "ml", "flow", (), {"cool": [1, 2, 3]}, (), {"cool": [2]}),
+        (
+            pytest.raises(AssertionError, match="does not match expected type"),
+            "ml",
+            "flow",
+            (),
+            {"cool": 3},
+            (),
+            {"cool": [2]},
+        ),
+    ],
+)
+def test_validate_args_respects_validation_exemptions(
+    expectation, al_name, func_name, user_args, user_kwargs, al_args, al_kwargs
+):
+    with expectation:
+        _validate_args(al_name, func_name, user_args, user_kwargs, al_args, al_kwargs)
 
 
 def test_validate_autologging_run_validates_autologging_tag_correctly():
@@ -1409,8 +1619,8 @@ def test_session_manager_exits_session_if_error_in_patch(
 
     # If use safe_patch to patch, exception would not come from original fn and so would be logged
     patch_destination.fn = patch_fn
-    with pytest.raises(Exception):
-        patch_destination.fn()
+    with pytest.raises(Exception, match="Exception that should stop autologging session"):
+        patch_destination.fn(lambda: None)
 
     assert _AutologgingSessionManager.active_session() is None
 
@@ -1542,7 +1752,10 @@ def test_old_patch_reverted_before_run_autolog_fn():
             pass
 
         safe_patch(
-            "test_old_patch_reverted_before_run_autolog_fn", PatchDestination, "f1", patch_impl,
+            "test_old_patch_reverted_before_run_autolog_fn",
+            PatchDestination,
+            "f1",
+            patch_impl,
         )
 
     autolog(disable=True)
@@ -1561,7 +1774,7 @@ def test_safe_patch_support_property_decorated_method():
         @property
         def predict(self):
             if not self._has_predict:
-                raise AttributeError()
+                raise AttributeError("does not have predict")
             return self._predict
 
     class ExtendedEstimator(BaseEstimator):
@@ -1582,10 +1795,18 @@ def test_safe_patch_support_property_decorated_method():
     @autologging_integration(flavor_name)
     def autolog(disable=False, exclusive=False, silent=False):  # pylint: disable=unused-argument
         mlflow.sklearn._patch_estimator_method_if_available(
-            flavor_name, BaseEstimator, "predict", patched_predict, manage_run=False,
+            flavor_name,
+            BaseEstimator,
+            "predict",
+            patched_predict,
+            manage_run=False,
         )
         mlflow.sklearn._patch_estimator_method_if_available(
-            flavor_name, ExtendedEstimator, "predict", patched_predict, manage_run=False,
+            flavor_name,
+            ExtendedEstimator,
+            "predict",
+            patched_predict,
+            manage_run=False,
         )
 
     autolog()
@@ -1604,7 +1825,7 @@ def test_safe_patch_support_property_decorated_method():
 
         bad_estimator = EstimatorCls(has_predict=False)
         assert not hasattr(bad_estimator, "predict")
-        with pytest.raises(AttributeError):
+        with pytest.raises(AttributeError, match="does not have predict"):
             bad_estimator.predict(X=1, a=2, b=3)
 
     autolog(disable=True)

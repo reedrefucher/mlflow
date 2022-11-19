@@ -1,33 +1,44 @@
 from collections import defaultdict, namedtuple, OrderedDict
 import logging
 import numpy as np
-import time
+import os
 from pkg_resources import resource_filename
+from urllib.parse import urlparse
 import weakref
 
 import mlflow
-from mlflow.entities import Metric, Param
 from mlflow.tracking.client import MlflowClient
+from mlflow.entities import Metric, Param
+from mlflow.exceptions import MlflowException
 from mlflow.utils import (
     _chunk_dict,
     _truncate_dict,
     _get_fully_qualified_class_name,
     _inspect_original_var_name,
 )
-from mlflow.utils.annotations import experimental
 from mlflow.utils.autologging_utils import (
     _get_new_training_session_class,
     autologging_integration,
     safe_patch,
+    resolve_input_example_and_signature,
 )
 from mlflow.utils.autologging_utils import get_method_call_arg_value
 from mlflow.utils.file_utils import TempDir
 from mlflow.utils.mlflow_tags import MLFLOW_AUTOLOGGING, MLFLOW_PARENT_RUN_ID
+from mlflow.utils.rest_utils import (
+    augmented_raise_for_status,
+    http_request,
+    MlflowHostCreds,
+)
 from mlflow.utils.validation import (
     MAX_PARAMS_TAGS_PER_BATCH,
     MAX_PARAM_VAL_LENGTH,
     MAX_ENTITY_KEY_LENGTH,
 )
+from mlflow.utils.autologging_utils import (
+    INPUT_EXAMPLE_SAMPLE_ROWS,
+)
+from mlflow.utils.time_utils import get_current_time_millis
 
 _logger = logging.getLogger(__name__)
 _SparkTrainingSession = _get_new_training_session_class()
@@ -36,14 +47,36 @@ AUTOLOGGING_INTEGRATION_NAME = "pyspark.ml"
 
 
 def _read_log_model_allowlist_from_file(allowlist_file):
-    allowlist = set()
-    with open(allowlist_file) as f:
-        for line in f:
+    def _parse_allowlist_file(line_iter):
+        allowlist = set()
+        for line in line_iter:
             stripped = line.strip()
             is_blankline_or_comment = stripped == "" or stripped.startswith("#")
             if not is_blankline_or_comment:
                 allowlist.add(stripped)
-    return allowlist
+        return allowlist
+
+    url_parsed = urlparse(allowlist_file)
+    scheme = url_parsed.scheme
+    path = url_parsed.path
+    if os.name == "nt" and not url_parsed.hostname:
+        path = scheme + "://" + path
+        scheme = ""
+    if scheme in ("file", ""):
+        if not os.path.exists(path):
+            raise MlflowException.invalid_parameter_value(f"{allowlist_file} does not exist")
+
+        with open(allowlist_file) as f:
+            return _parse_allowlist_file(f)
+    else:
+        host_creds = MlflowHostCreds(
+            host=scheme + "://" + (url_parsed.hostname or ""),
+            username=url_parsed.username,
+            password=url_parsed.password,
+        )
+        response = http_request(host_creds=host_creds, endpoint=path, method="GET")
+        augmented_raise_for_status(response)
+        return _parse_allowlist_file(response.iter_lines(decode_unicode=True))
 
 
 def _read_log_model_allowlist():
@@ -102,7 +135,14 @@ def _should_log_model(spark_model):
 
     # TODO: Handle PipelineModel/CrossValidatorModel/TrainValidationSplitModel
     class_name = _get_fully_qualified_class_name(spark_model)
-    if class_name in _log_model_allowlist:
+    should_log = class_name in _log_model_allowlist
+    if not should_log:
+        for name in _log_model_allowlist:
+            # only support one trailing *
+            if name.endswith("*") and class_name.startswith(name[:-1]):
+                should_log = True
+                break
+    if should_log:
         if class_name == "pyspark.ml.classification.OneVsRestModel":
             return _should_log_model(spark_model.models[0])
         elif class_name == "pyspark.ml.pipeline.PipelineModel":
@@ -112,7 +152,12 @@ def _should_log_model(spark_model):
         elif _is_parameter_search_model(spark_model):
             return _should_log_model(spark_model.bestModel)
         else:
-            return True
+            return all(
+                _should_log_model(param_value)
+                for _, param_value in _get_param_map(spark_model).items()
+                # Transformers are logged by default as the same behavior as PipelineModel
+                if isinstance(param_value, Model)
+            )
     else:
         return False
 
@@ -144,7 +189,11 @@ def _should_log_hierarchy(estimator):
     from pyspark.ml import Pipeline
     from pyspark.ml.classification import OneVsRest
 
-    return isinstance(estimator, (Pipeline, OneVsRest)) or _is_parameter_search_estimator(estimator)
+    return (
+        isinstance(estimator, (Pipeline, OneVsRest))
+        or _is_parameter_search_estimator(estimator)
+        or any(_get_stage_type_params(estimator))
+    )
 
 
 _AutologgingEstimatorMetadata = namedtuple(
@@ -155,7 +204,6 @@ _AutologgingEstimatorMetadata = namedtuple(
 
 def _traverse_stage(stage):
     from pyspark.ml import Pipeline
-    from pyspark.ml.classification import OneVsRest
 
     yield stage
     if isinstance(stage, Pipeline):
@@ -169,11 +217,10 @@ def _traverse_stage(stage):
             )
         for stage in original_sub_stages:
             yield from _traverse_stage(stage)
-    elif isinstance(stage, OneVsRest):
-        yield from _traverse_stage(stage.getClassifier())
-    elif _is_parameter_search_estimator(stage):
-        yield from _traverse_stage(stage.getEstimator())
-        yield from _traverse_stage(stage.getEvaluator())
+    else:
+        # General support for params that of type Params
+        for _, param_value in _get_stage_type_params(stage).items():
+            yield from _traverse_stage(param_value)
 
 
 def _get_uid_to_indexed_name_map(estimator):
@@ -189,9 +236,7 @@ def _get_uid_to_indexed_name_map(estimator):
     }
 
 
-def _gen_stage_hierarchy_recursively(
-    stage, uid_to_indexed_name_map,
-):
+def _gen_stage_hierarchy_recursively(stage, uid_to_indexed_name_map):
     from pyspark.ml import Pipeline
     from pyspark.ml.classification import OneVsRest
 
@@ -218,6 +263,12 @@ def _gen_stage_hierarchy_recursively(
                 tuned_estimator, uid_to_indexed_name_map
             ),
         }
+    elif any(_get_stage_type_params(stage)):
+        sub_params = {}
+        for param_name, param_value in _get_stage_type_params(stage).items():
+            sub_hierarchy = _gen_stage_hierarchy_recursively(param_value, uid_to_indexed_name_map)
+            sub_params[param_name] = sub_hierarchy
+        return {"name": stage_name, "params": sub_params}
     else:
         return {"name": stage_name}
 
@@ -256,6 +307,19 @@ def _get_param_map(instance):
         param.name: instance.getOrDefault(param)
         for param in instance.params
         if instance.isDefined(param)
+    }
+
+
+def _get_stage_type_params(instance):
+    """
+    Get the param map of the instance where param value is of type pyspark.ml.param.Params
+    """
+    from pyspark.ml.param import Params
+
+    return {
+        param.name: instance.getOrDefault(param)
+        for param in instance.params
+        if instance.isDefined(param) and isinstance(instance.getOrDefault(param), Params)
     }
 
 
@@ -322,14 +386,14 @@ def _create_child_runs_for_parameter_search(parent_estimator, parent_model, pare
     # start time of child runs, since we cannot precisely determine when each point
     # in the parameter search space was explored
     child_run_start_time = parent_run.info.start_time
-    child_run_end_time = int(time.time() * 1000)
+    child_run_end_time = get_current_time_millis()
 
     estimator_param_maps = parent_estimator.getEstimatorParamMaps()
     tuned_estimator = parent_estimator.getEstimator()
 
     metrics_dict, _ = _get_param_search_metrics_and_best_index(parent_estimator, parent_model)
-    for i in range(len(estimator_param_maps)):
-        child_estimator = tuned_estimator.copy(estimator_param_maps[i])
+    for i, est_param in enumerate(estimator_param_maps):
+        child_estimator = tuned_estimator.copy(est_param)
         tags_to_log = dict(child_tags) if child_tags else {}
         tags_to_log.update({MLFLOW_PARENT_RUN_ID: parent_run.info.run_id})
         tags_to_log.update(_get_estimator_info_tags(child_estimator))
@@ -449,7 +513,7 @@ def _get_param_search_metrics_and_best_index(param_search_estimator, param_searc
 
 def _log_estimator_params(param_map):
     # Chunk model parameters to avoid hitting the log_batch API limit
-    for chunk in _chunk_dict(param_map, chunk_size=MAX_PARAMS_TAGS_PER_BATCH,):
+    for chunk in _chunk_dict(param_map, chunk_size=MAX_PARAMS_TAGS_PER_BATCH):
         truncated = _truncate_dict(chunk, MAX_ENTITY_KEY_LENGTH, MAX_PARAM_VAL_LENGTH)
         mlflow.log_params(truncated)
 
@@ -533,7 +597,7 @@ class _AutologgingMetricsManager:
         as an MLflow metric.
         """
         return isinstance(metric_value, (int, float, np.number)) and not isinstance(
-            metric_value, (bool, np.bool)
+            metric_value, bool
         )
 
     def register_model(self, model, run_id):
@@ -656,7 +720,7 @@ class _AutologgingMetricsManager:
         """
         # Note: if the case log the same metric key multiple times,
         #  newer value will overwrite old value
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         client.log_metric(run_id=run_id, key=key, value=value)
         if self._metric_info_artifact_need_update[run_id]:
             evaluator_call_list = []
@@ -674,7 +738,17 @@ class _AutologgingMetricsManager:
 _AUTOLOGGING_METRICS_MANAGER = _AutologgingMetricsManager()
 
 
-@experimental
+def _get_columns_with_unsupported_data_type(df):
+    from mlflow.types.schema import DataType
+
+    supported_spark_types = DataType.get_spark_types()
+    unsupported_columns = []
+    for field in df.schema.fields:
+        if field.dataType not in supported_spark_types:
+            unsupported_columns.append(field)
+    return unsupported_columns
+
+
 @autologging_integration(AUTOLOGGING_INTEGRATION_NAME)
 def autolog(
     log_models=True,
@@ -683,6 +757,9 @@ def autolog(
     disable_for_unsupported_versions=False,
     silent=False,
     log_post_training_metrics=True,
+    registered_model_name=None,
+    log_input_examples=False,
+    log_model_signatures=True,
 ):  # pylint: disable=unused-argument
     """
     Enables (or disables) and configures autologging for pyspark ml estimators.
@@ -729,7 +806,7 @@ def autolog(
 
         **Limitations**
           - MLflow cannot find run information for other objects derived from a given prediction
-            result (e.g. by doing some tranformation on the prediction result dataset).
+            result (e.g. by doing some transformation on the prediction result dataset).
 
       **Artifacts**
         - An MLflow Model with the :py:mod:`mlflow.spark` flavor containing a fitted estimator
@@ -797,6 +874,23 @@ def autolog(
     :param log_post_training_metrics: If ``True``, post training metrics are logged. Defaults to
                                       ``True``. See the `post training metrics`_ section for more
                                       details.
+    :param registered_model_name: If given, each time a model is trained, it is registered as a
+                                  new model version of the registered model with this name.
+                                  The registered model is created if it does not already exist.
+    :param log_input_examples: If ``True``, input examples from training datasets are collected and
+                               logged along with pyspark ml model artifacts during training. If
+                               ``False``, input examples are not logged.
+    :param log_model_signatures: If ``True``,
+                                 :py:class:`ModelSignatures <mlflow.models.ModelSignature>`
+                                 describing model inputs and outputs are collected and logged along
+                                 with spark ml pipeline/estimator artifacts during training.
+                                 If ``False`` signatures are not logged.
+
+                                 .. warning::
+
+                                    Currently, only scalar Spark data types are supported. If
+                                    model inputs/outputs contain non-scalar Spark data types such
+                                    as ``pyspark.ml.linalg.Vector``, signatures are not logged.
 
     **The default log model allowlist in mlflow**
         .. literalinclude:: ../../../mlflow/pyspark/ml/log_model_allowlist.txt
@@ -850,7 +944,7 @@ def autolog(
 
         mlflow.set_tags(_get_estimator_info_tags(estimator))
 
-    def _log_posttraining_metadata(estimator, spark_model, params):
+    def _log_posttraining_metadata(estimator, spark_model, params, input_df):
 
         if _is_parameter_search_estimator(estimator):
             try:
@@ -898,13 +992,73 @@ def autolog(
 
         if log_models:
             if _should_log_model(spark_model):
-                # TODO: support model signature
+                from mlflow.models import infer_signature
+                from mlflow.pyspark.ml._autolog import (
+                    cast_spark_df_with_vector_to_array,
+                    get_feature_cols,
+                )
+                from mlflow.spark import _find_and_set_features_col_as_vector_if_needed
+                from pyspark.sql import SparkSession
+
+                spark = SparkSession.builder.getOrCreate()
+
+                def _get_input_example_as_pd_df():
+                    feature_cols = list(get_feature_cols(input_df, spark_model))
+                    limited_input_df = input_df.select(feature_cols).limit(
+                        INPUT_EXAMPLE_SAMPLE_ROWS
+                    )
+                    return cast_spark_df_with_vector_to_array(limited_input_df).toPandas()
+
+                def _infer_model_signature(input_example_slice):
+                    input_slice_df = _find_and_set_features_col_as_vector_if_needed(
+                        spark.createDataFrame(input_example_slice), spark_model
+                    )
+                    model_output = spark_model.transform(input_slice_df).drop(
+                        *input_slice_df.columns
+                    )
+                    # TODO: Remove this once we support non-scalar spark data types
+                    unsupported_columns = _get_columns_with_unsupported_data_type(model_output)
+                    if unsupported_columns:
+                        _logger.warning(
+                            "Model outputs contain unsupported Spark data types: "
+                            f"{unsupported_columns}. Output schema is not be logged."
+                        )
+                        model_output = None
+                    else:
+                        model_output = model_output.toPandas()
+
+                    return infer_signature(input_example_slice, model_output)
+
+                # TODO: Remove this once we support non-scalar spark data types
+                nonlocal log_model_signatures
+                if log_model_signatures:
+                    unsupported_columns = _get_columns_with_unsupported_data_type(input_df)
+                    if unsupported_columns:
+                        _logger.warning(
+                            "Model inputs contain unsupported Spark data types: "
+                            f"{unsupported_columns}. Model signature is not logged."
+                        )
+                        log_model_signatures = False
+
+                input_example, signature = resolve_input_example_and_signature(
+                    _get_input_example_as_pd_df,
+                    _infer_model_signature,
+                    log_input_examples,
+                    log_model_signatures,
+                    _logger,
+                )
+
                 mlflow.spark.log_model(
-                    spark_model, artifact_path="model",
+                    spark_model,
+                    artifact_path="model",
+                    registered_model_name=registered_model_name,
+                    input_example=input_example,
+                    signature=signature,
                 )
                 if _is_parameter_search_model(spark_model):
                     mlflow.spark.log_model(
-                        spark_model.bestModel, artifact_path="best_model",
+                        spark_model.bestModel,
+                        artifact_path="best_model",
                     )
             else:
                 _logger.warning(_get_warning_msg_for_skip_log_model(spark_model))
@@ -924,10 +1078,15 @@ def autolog(
         else:
             # we need generate estimator param map so we call `self.copy(params)` to construct
             # an estimator with the extra params.
+            from pyspark.storagelevel import StorageLevel
+
             estimator = self.copy(params) if params is not None else self
             _log_pretraining_metadata(estimator, params)
+            input_training_df = args[0].persist(StorageLevel.MEMORY_AND_DISK)
             spark_model = original(self, *args, **kwargs)
-            _log_posttraining_metadata(estimator, spark_model, params)
+            _log_posttraining_metadata(estimator, spark_model, params, input_training_df)
+            input_training_df.unpersist()
+
             return spark_model
 
     def patched_fit(original, self, *args, **kwargs):
@@ -995,13 +1154,25 @@ def autolog(
             return original(self, *args, **kwargs)
 
     safe_patch(
-        AUTOLOGGING_INTEGRATION_NAME, Estimator, "fit", patched_fit, manage_run=True,
+        AUTOLOGGING_INTEGRATION_NAME,
+        Estimator,
+        "fit",
+        patched_fit,
+        manage_run=True,
     )
 
     if log_post_training_metrics:
         safe_patch(
-            AUTOLOGGING_INTEGRATION_NAME, Model, "transform", patched_transform, manage_run=False,
+            AUTOLOGGING_INTEGRATION_NAME,
+            Model,
+            "transform",
+            patched_transform,
+            manage_run=False,
         )
         safe_patch(
-            AUTOLOGGING_INTEGRATION_NAME, Evaluator, "evaluate", patched_evaluate, manage_run=False,
+            AUTOLOGGING_INTEGRATION_NAME,
+            Evaluator,
+            "evaluate",
+            patched_evaluate,
+            manage_run=False,
         )

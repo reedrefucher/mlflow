@@ -1,10 +1,10 @@
 import logging
 import os
 import re
-from shlex import quote
 import subprocess
 
 from mlflow.models import FlavorBackend
+from mlflow.utils.string_utils import quote
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 
 _logger = logging.getLogger(__name__)
@@ -16,9 +16,17 @@ class RFuncBackend(FlavorBackend):
     Predict and serve locally models with 'crate' flavor.
     """
 
-    version_pattern = re.compile("version ([0-9]+[.][0-9]+[.][0-9]+)")
+    def build_image(self, model_uri, image_name, install_mlflow, mlflow_home, enable_mlserver):
+        pass
 
-    def predict(self, model_uri, input_path, output_path, content_type, json_format):
+    def generate_dockerfile(
+        self, model_uri, output_path, install_mlflow, mlflow_home, enable_mlserver
+    ):
+        pass
+
+    version_pattern = re.compile(r"version ([0-9]+\.[0-9]+\.[0-9]+)")
+
+    def predict(self, model_uri, input_path, output_path, content_type):
         """
         Generate predictions using R model saved with MLflow.
         Return the prediction results as a JSON.
@@ -26,18 +34,27 @@ class RFuncBackend(FlavorBackend):
         model_path = _download_artifact_from_uri(model_uri)
         str_cmd = (
             "mlflow:::mlflow_rfunc_predict(model_path = '{0}', input_path = {1}, "
-            "output_path = {2}, content_type = {3}, json_format = {4})"
+            "output_path = {2}, content_type = {3})"
         )
         command = str_cmd.format(
             quote(model_path),
             _str_optional(input_path),
             _str_optional(output_path),
             _str_optional(content_type),
-            _str_optional(json_format),
         )
         _execute(command)
 
-    def serve(self, model_uri, port, host, enable_mlserver):
+    def serve(
+        self,
+        model_uri,
+        port,
+        host,
+        timeout,
+        enable_mlserver,
+        synchronous=True,
+        stdout=None,
+        stderr=None,
+    ):
         """
         Generate R model locally.
 
@@ -48,6 +65,15 @@ class RFuncBackend(FlavorBackend):
         if enable_mlserver:
             raise Exception("The MLServer inference server is not yet supported in the R backend.")
 
+        if timeout:
+            _logger.warning("Timeout is not yet supported in the R backend.")
+
+        if not synchronous:
+            raise Exception("RBackend does not support call with synchronous=False")
+
+        if stdout is not None or stderr is not None:
+            raise Exception("RBackend does not support redirect stdout/stderr.")
+
         model_path = _download_artifact_from_uri(model_uri)
         command = "mlflow::mlflow_rfunc_serve('{0}', port = {1}, host = '{2}')".format(
             quote(model_path), port, host
@@ -55,14 +81,18 @@ class RFuncBackend(FlavorBackend):
         _execute(command)
 
     def can_score_model(self):
+        # `Rscript --version` writes to stderr in R < 4.2.0 but stdout in R >= 4.2.0.
         process = subprocess.Popen(
-            ["Rscript", "--version"], close_fds=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ["Rscript", "--version"],
+            close_fds=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
-        _, stderr = process.communicate()
+        stdout, _ = process.communicate()
         if process.wait() != 0:
             return False
 
-        version = self.version_pattern.search(stderr.decode("utf-8"))
+        version = self.version_pattern.search(stdout.decode("utf-8"))
         if not version:
             return False
         version = [int(x) for x in version.group(1).split(".")]

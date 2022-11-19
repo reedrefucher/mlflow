@@ -1,7 +1,7 @@
 import React from 'react';
 import { DirectTransitionForm } from './DirectTransitionForm';
 import { ACTIVE_STAGES, Stages } from '../constants';
-import { Checkbox } from 'antd';
+import { Checkbox } from '@databricks/design-system';
 import _ from 'lodash';
 import { mountWithIntl } from '../../common/utils/TestUtils';
 
@@ -11,7 +11,7 @@ describe('DirectTransitionForm', () => {
 
   beforeEach(() => {
     minimalProps = {
-      form: { getFieldDecorator: jest.fn(() => (c) => c) },
+      innerRef: React.createRef(),
     };
   });
 

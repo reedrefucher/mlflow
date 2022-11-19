@@ -21,15 +21,63 @@ class AbstractStore:
         pass
 
     @abstractmethod
-    def list_experiments(self, view_type=ViewType.ACTIVE_ONLY, max_results=None, page_token=None):
+    def search_experiments(
+        self,
+        view_type=ViewType.ACTIVE_ONLY,
+        max_results=SEARCH_MAX_RESULTS_DEFAULT,
+        filter_string=None,
+        order_by=None,
+        page_token=None,
+    ):
         """
-        :param view_type: Qualify requested type of experiments.
-        :param max_results: If passed, specifies the maximum number of experiments desired. If not
-                            passed, all experiments will be returned. However, certain server
-                            backend may apply its own limit. Check returned ``PagedList`` token to
-                            see if additional experiments are available.
+        Search for experiments that match the specified search query.
+
+        :param view_type: One of enum values ``ACTIVE_ONLY``, ``DELETED_ONLY``, or ``ALL``
+                          defined in :py:class:`mlflow.entities.ViewType`.
+        :param max_results: Maximum number of experiments desired. Certain server backend may apply
+                            its own limit.
+        :param filter_string:
+            Filter query string (e.g., ``"name = 'my_experiment'"``), defaults to searching for all
+            experiments. The following identifiers, comparators, and logical operators are
+            supported.
+
+            Identifiers
+              - ``name``: Experiment name
+              - ``creation_time``: Experiment creation time
+              - ``last_update_time``: Experiment last update time
+              - ``tags.<tag_key>``: Experiment tag. If ``tag_key`` contains
+                spaces, it must be wrapped with backticks (e.g., ``"tags.`extra key`"``).
+
+            Comparators for string attributes and tags
+              - ``=``: Equal to
+              - ``!=``: Not equal to
+              - ``LIKE``: Case-sensitive pattern match
+              - ``ILIKE``: Case-insensitive pattern match
+
+            Comparators for numeric attributes
+              - ``=``: Equal to
+              - ``!=``: Not equal to
+              - ``<``: Less than
+              - ``<=``: Less than or equal to
+              - ``>``: Greater than
+              - ``>=``: Greater than or equal to
+
+            Logical operators
+              - ``AND``: Combines two sub-queries and returns True if both of them are True.
+
+        :param order_by:
+            List of columns to order by. The ``order_by`` column can contain an optional ``DESC`` or
+            ``ASC`` value (e.g., ``"name DESC"``). The default ordering is ``ASC``, so ``"name"`` is
+            equivalent to ``"name ASC"``. If unspecified, defaults to ``["last_update_time DESC"]``,
+            which lists experiments updated most recently first. The following fields are supported:
+
+            - ``experiment_id``: Experiment ID
+            - ``name``: Experiment name
+            - ``creation_time``: Experiment creation time
+            - ``last_update_time``: Experiment last update time
+
         :param page_token: Token specifying the next page of results. It should be obtained from
-                            a ``list_experiments`` call.
+                           a ``search_experiments`` call.
         :return: A :py:class:`PagedList <mlflow.store.entities.PagedList>` of
                  :py:class:`Experiment <mlflow.entities.Experiment>` objects. The pagination token
                  for the next page can be obtained via the ``token`` attribute of the object.
@@ -66,17 +114,12 @@ class AbstractStore:
     def get_experiment_by_name(self, experiment_name):
         """
         Fetch the experiment by name from the backend store.
-        This is a base implementation using ``list_experiments``, derived classes may have
-        some specialized implementations.
 
         :param experiment_name: Name of experiment
 
         :return: A single :py:class:`mlflow.entities.Experiment` object if it exists.
         """
-        for experiment in self.list_experiments(ViewType.ALL):
-            if experiment.name == experiment_name:
-                return experiment
-        return None
+        pass
 
     @abstractmethod
     def delete_experiment(self, experiment_id):
@@ -125,7 +168,7 @@ class AbstractStore:
         pass
 
     @abstractmethod
-    def update_run_info(self, run_id, run_status, end_time):
+    def update_run_info(self, run_id, run_status, end_time, run_name):
         """
         Update the metadata of the specified run.
 
@@ -134,7 +177,7 @@ class AbstractStore:
         pass
 
     @abstractmethod
-    def create_run(self, experiment_id, user_id, start_time, tags):
+    def create_run(self, experiment_id, user_id, start_time, tags, run_name):
         """
         Create a run under the specified experiment ID, setting the run's status to "RUNNING"
         and the start time to the current time.
@@ -261,36 +304,6 @@ class AbstractStore:
             and ``token`` is the pagination token for the next page of results.
         """
         pass
-
-    def list_run_infos(
-        self,
-        experiment_id,
-        run_view_type,
-        max_results=SEARCH_MAX_RESULTS_DEFAULT,
-        order_by=None,
-        page_token=None,
-    ):
-        """
-        Return run information for runs which belong to the experiment_id.
-
-        :param experiment_id: The experiment id which to search
-        :param run_view_type: ACTIVE_ONLY, DELETED_ONLY, or ALL runs
-        :param max_results: Maximum number of results desired.
-        :param order_by: List of order_by clauses.
-        :param page_token: Token specifying the next page of results. It should be obtained from
-            a ``list_run_infos`` call.
-
-        :return: A :py:class:`PagedList <mlflow.store.entities.PagedList>` of
-            :py:class:`RunInfo <mlflow.entities.RunInfo>` objects that satisfy the search
-            expressions. If the underlying tracking store supports pagination, the token for the
-            next page may be obtained via the ``token`` attribute of the returned object; however,
-            some store implementations may not support pagination and thus the returned token would
-            not be meaningful in such cases.
-        """
-        search_result = self.search_runs(
-            [experiment_id], None, run_view_type, max_results, order_by, page_token
-        )
-        return PagedList([run.info for run in search_result], search_result.token)
 
     @abstractmethod
     def log_batch(self, run_id, metrics, params, tags):

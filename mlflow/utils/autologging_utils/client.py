@@ -9,7 +9,6 @@ Remove this developer API.
 """
 
 import os
-import time
 import logging
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -28,11 +27,14 @@ from mlflow.utils.validation import (
     MAX_PARAMS_TAGS_PER_BATCH,
     MAX_METRICS_PER_BATCH,
 )
+from mlflow.utils.time_utils import get_current_time_millis
 
 
 _logger = logging.getLogger(__name__)
 
-_PendingCreateRun = namedtuple("_PendingCreateRun", ["experiment_id", "start_time", "tags"])
+_PendingCreateRun = namedtuple(
+    "_PendingCreateRun", ["experiment_id", "start_time", "tags", "run_name"]
+)
 _PendingSetTerminated = namedtuple("_PendingSetTerminated", ["status", "end_time"])
 
 
@@ -136,6 +138,7 @@ class MlflowAutologgingQueueingClient:
         experiment_id: str,
         start_time: Optional[int] = None,
         tags: Optional[Dict[str, Any]] = None,
+        run_name: Optional[str] = None,
     ) -> PendingRunId:
         """
         Enqueues a CreateRun operation with the specified attributes, returning a `PendingRunId`
@@ -155,6 +158,7 @@ class MlflowAutologgingQueueingClient:
                 experiment_id=experiment_id,
                 start_time=start_time,
                 tags=[RunTag(key, str(value)) for key, value in tags.items()],
+                run_name=run_name,
             )
         )
         return run_id
@@ -170,7 +174,7 @@ class MlflowAutologgingQueueingClient:
         for the specified `run_id`.
         """
         self._get_pending_operations(run_id).enqueue(
-            set_terminated=_PendingSetTerminated(status=status, end_time=end_time,)
+            set_terminated=_PendingSetTerminated(status=status, end_time=end_time)
         )
 
     def log_params(self, run_id: Union[str, PendingRunId], params: Dict[str, Any]) -> None:
@@ -194,7 +198,7 @@ class MlflowAutologgingQueueingClient:
         step specified by `step`.
         """
         metrics = _truncate_dict(metrics, max_key_length=MAX_ENTITY_KEY_LENGTH)
-        timestamp_ms = int(time.time() * 1000)
+        timestamp_ms = get_current_time_millis()
         metrics_arr = [
             Metric(key, value, timestamp_ms, step or 0) for key, value in metrics.items()
         ]
@@ -228,7 +232,8 @@ class MlflowAutologgingQueueingClient:
         logging_futures = []
         for pending_operations in self._pending_ops_by_run_id.values():
             future = _AUTOLOGGING_QUEUEING_CLIENT_THREAD_POOL.submit(
-                self._flush_pending_operations, pending_operations=pending_operations,
+                self._flush_pending_operations,
+                pending_operations=pending_operations,
             )
             logging_futures.append(future)
         self._pending_ops_by_run_id = {}
@@ -292,16 +297,19 @@ class MlflowAutologgingQueueingClient:
         operation_results = []
 
         param_batches_to_log = chunk_list(
-            pending_operations.params_queue, chunk_size=MAX_PARAMS_TAGS_PER_BATCH,
+            pending_operations.params_queue,
+            chunk_size=MAX_PARAMS_TAGS_PER_BATCH,
         )
         tag_batches_to_log = chunk_list(
-            pending_operations.tags_queue, chunk_size=MAX_PARAMS_TAGS_PER_BATCH,
+            pending_operations.tags_queue,
+            chunk_size=MAX_PARAMS_TAGS_PER_BATCH,
         )
         for params_batch, tags_batch in zip_longest(
             param_batches_to_log, tag_batches_to_log, fillvalue=[]
         ):
             metrics_batch_size = min(
-                MAX_ENTITIES_PER_BATCH - len(params_batch) - len(tags_batch), MAX_METRICS_PER_BATCH,
+                MAX_ENTITIES_PER_BATCH - len(params_batch) - len(tags_batch),
+                MAX_METRICS_PER_BATCH,
             )
             metrics_batch_size = max(metrics_batch_size, 0)
             metrics_batch = pending_operations.metrics_queue[:metrics_batch_size]
@@ -321,7 +329,7 @@ class MlflowAutologgingQueueingClient:
             pending_operations.metrics_queue, chunk_size=MAX_METRICS_PER_BATCH
         ):
             operation_results.append(
-                self._try_operation(self._client.log_batch, run_id=run_id, metrics=metrics_batch,)
+                self._try_operation(self._client.log_batch, run_id=run_id, metrics=metrics_batch)
             )
 
         if pending_operations.set_terminated:
@@ -339,7 +347,7 @@ class MlflowAutologgingQueueingClient:
             raise MlflowException(
                 message=(
                     "Failed to perform one or more operations on the run with ID {run_id}."
-                    " Failed operations: {failures}".format(run_id=run_id, failures=failures,)
+                    " Failed operations: {failures}".format(run_id=run_id, failures=failures)
                 )
             )
 

@@ -25,6 +25,8 @@ from mlflow.utils.environment import (
     _CONDA_ENV_FILE_NAME,
     _REQUIREMENTS_FILE_NAME,
     _CONSTRAINTS_FILE_NAME,
+    _PYTHON_ENV_FILE_NAME,
+    _PythonEnv,
 )
 from mlflow.utils.requirements_utils import _get_pinned_requirement
 from mlflow.utils.file_utils import write_to
@@ -57,7 +59,7 @@ def get_default_conda_env():
     return _mlflow_conda_env(additional_pip_deps=get_default_pip_requirements())
 
 
-class PythonModel(object):
+class PythonModel:
     """
     Represents a generic Python model that evaluates inputs and produces API-compatible outputs.
     By subclassing :class:`~PythonModel`, users can create customized MLflow models with the
@@ -71,7 +73,7 @@ class PythonModel(object):
         """
         Loads artifacts from the specified :class:`~PythonModelContext` that can be used by
         :func:`~PythonModel.predict` when evaluating inputs. When loading an MLflow model with
-        :func:`~load_pyfunc`, this method is called as soon as the :class:`~PythonModel` is
+        :func:`~load_model`, this method is called as soon as the :class:`~PythonModel` is
         constructed.
 
         The same :class:`~PythonModelContext` will also be available during calls to
@@ -94,7 +96,7 @@ class PythonModel(object):
         """
 
 
-class PythonModelContext(object):
+class PythonModelContext:
     """
     A collection of artifacts that a :class:`~PythonModel` can use when performing inference.
     :class:`~PythonModelContext` objects are created *implicitly* by the
@@ -202,8 +204,9 @@ def _save_model_with_class_artifacts_params(
         model=mlflow_model,
         loader_module=__name__,
         code=saved_code_subpath,
-        env=_CONDA_ENV_FILE_NAME,
-        **custom_model_config_kwargs
+        conda_env=_CONDA_ENV_FILE_NAME,
+        python_env=_PYTHON_ENV_FILE_NAME,
+        **custom_model_config_kwargs,
     )
     mlflow_model.save(os.path.join(path, MLMODEL_FILE_NAME))
 
@@ -213,13 +216,17 @@ def _save_model_with_class_artifacts_params(
             # To ensure `_load_pyfunc` can successfully load the model during the dependency
             # inference, `mlflow_model.save` must be called beforehand to save an MLmodel file.
             inferred_reqs = mlflow.models.infer_pip_requirements(
-                path, mlflow.pyfunc.FLAVOR_NAME, fallback=default_reqs,
+                path,
+                mlflow.pyfunc.FLAVOR_NAME,
+                fallback=default_reqs,
             )
             default_reqs = sorted(set(inferred_reqs).union(default_reqs))
         else:
             default_reqs = None
         conda_env, pip_requirements, pip_constraints = _process_pip_requirements(
-            default_reqs, pip_requirements, extra_pip_requirements,
+            default_reqs,
+            pip_requirements,
+            extra_pip_requirements,
         )
     else:
         conda_env, pip_requirements, pip_constraints = _process_conda_env(conda_env)
@@ -233,6 +240,8 @@ def _save_model_with_class_artifacts_params(
 
     # Save `requirements.txt`
     write_to(os.path.join(path, _REQUIREMENTS_FILE_NAME), "\n".join(pip_requirements))
+
+    _PythonEnv.current().to_yaml(os.path.join(path, _PYTHON_ENV_FILE_NAME))
 
 
 def _load_pyfunc(model_path):
@@ -277,7 +286,7 @@ def _load_pyfunc(model_path):
     return _PythonModelPyfuncWrapper(python_model=python_model, context=context)
 
 
-class _PythonModelPyfuncWrapper(object):
+class _PythonModelPyfuncWrapper:
     """
     Wrapper class that creates a predict function such that
     predict(model_input: pd.DataFrame) -> model's output as pd.DataFrame (pandas DataFrame)

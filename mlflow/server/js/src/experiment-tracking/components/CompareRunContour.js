@@ -1,6 +1,6 @@
 import React, { Component } from 'react';
 import { AllHtmlEntities } from 'html-entities';
-import { Switch } from 'antd';
+import { Switch, Select, Spacer } from '@databricks/design-system';
 import PropTypes from 'prop-types';
 import { getParams, getRunInfo } from '../reducers/Reducers';
 import { connect } from 'react-redux';
@@ -8,10 +8,12 @@ import './CompareRunView.css';
 import { RunInfo } from '../sdk/MlflowMessages';
 import Utils from '../../common/utils/Utils';
 import { getLatestMetrics } from '../reducers/MetricReducer';
-import './CompareRunContour.css';
 import CompareRunUtil from './CompareRunUtil';
 import { FormattedMessage } from 'react-intl';
 import { LazyPlot } from './LazyPlot';
+import { CompareRunPlotContainer } from './CompareRunPlotContainer';
+
+const { Option, OptGroup } = Select;
 
 export class CompareRunContour extends Component {
   static propTypes = {
@@ -148,23 +150,12 @@ export class CompareRunContour extends Component {
       tooltips.push(this.getPlotlyTooltip(index));
     });
 
-    // array.sort() doesn't sort negative values correctly.
-    const xsSorted = [...new Set(xs)].sort((a, b) => a - b);
-    const ysSorted = [...new Set(ys)].sort((a, b) => a - b);
-    const z = ysSorted.map(() => xsSorted.map(() => null));
-
-    xs.forEach((_, index) => {
-      const xi = xsSorted.indexOf(xs[index]);
-      const yi = ysSorted.indexOf(ys[index]);
-      z[yi][xi] = zs[index];
-    });
-
     const maybeRenderPlot = () => {
       const invalidAxes = [];
-      if (xsSorted.length < 2) {
+      if (new Set(xs).size < 2) {
         invalidAxes.push('X');
       }
-      if (ysSorted.length < 2) {
+      if (new Set(ys).size < 2) {
         invalidAxes.push('Y');
       }
       if (invalidAxes.length > 0) {
@@ -172,17 +163,22 @@ export class CompareRunContour extends Component {
           invalidAxes.length > 1
             ? `The ${invalidAxes.join(' and ')} axes don't`
             : `The ${invalidAxes[0]} axis doesn't`;
-        return <>{`${messageHead} have enough unique data points to render the contour plot.`}</>;
+        return (
+          <div
+            css={styles.noDataMessage}
+          >{`${messageHead} have enough unique data points to render the contour plot.`}</div>
+        );
       }
 
       return (
         <LazyPlot
+          css={styles.plot}
           data={[
             // contour plot
             {
-              z,
-              x: xsSorted,
-              y: ysSorted,
+              z: zs,
+              x: xs,
+              y: ys,
               type: 'contour',
               hoverinfo: 'none',
               colorscale: this.getColorscale(),
@@ -193,8 +189,8 @@ export class CompareRunContour extends Component {
             },
             // scatter plot
             {
-              x: xsSorted,
-              y: ysSorted,
+              x: xs,
+              y: ys,
               text: tooltips,
               hoverinfo: 'text',
               type: 'scattergl',
@@ -219,7 +215,6 @@ export class CompareRunContour extends Component {
               range: [Math.min(...ys), Math.max(...ys)],
             },
           }}
-          className={'scatter-plotly'}
           config={{
             responsive: true,
             displaylogo: false,
@@ -239,101 +234,88 @@ export class CompareRunContour extends Component {
     };
 
     return (
-      <div className='responsive-table-container'>
-        <div className='container-fluid'>
-          <div className='row'>
-            <form className='col-xs-3'>
-              <div className='form-group'>
-                <label htmlFor='x-axis-selector'>
-                  <FormattedMessage
-                    defaultMessage='X-axis:'
-                    description='Label text for x-axis in contour plot comparison in MLflow'
-                  />
-                </label>
-                {this.renderSelect('xaxis')}
-              </div>
-              <div className='form-group'>
-                <label htmlFor='y-axis-selector'>
-                  <FormattedMessage
-                    defaultMessage='Y-axis:'
-                    description='Label text for y-axis in contour plot comparison in MLflow'
-                  />
-                </label>
-                {this.renderSelect('yaxis')}
-              </div>
-              <div className='form-group'>
-                <label htmlFor='z-axis-selector'>
-                  <FormattedMessage
-                    defaultMessage='Z-axis:'
-                    description='Label text for z-axis in contour plot comparison in MLflow'
-                  />
-                </label>
-                {this.renderSelect('zaxis')}
-              </div>
-              <div className='inline-control'>
-                <div className='control-label'>
-                  <FormattedMessage
-                    defaultMessage='Reverse color:'
-                    description='Label text for reverse color toggle in contour plot comparison
-                      in MLflow'
-                  />
-                </div>
-                <Switch
-                  className='show-point-toggle'
-                  checkedChildren={
-                    <FormattedMessage
-                      defaultMessage='On'
-                      description='Checked toggle text for reverse color toggle in contour plot
-                        comparison in MLflow'
-                    />
-                  }
-                  unCheckedChildren={
-                    <FormattedMessage
-                      defaultMessage='Off'
-                      description='Unchecked toggle text for reverse color toggle in contour plot
-                        comparison in MLflow'
-                    />
-                  }
-                  onChange={(checked) => this.setState({ reverseColor: checked })}
+      <CompareRunPlotContainer
+        controls={
+          <>
+            <div>
+              <label htmlFor='x-axis-selector'>
+                <FormattedMessage
+                  defaultMessage='X-axis:'
+                  description='Label text for x-axis in contour plot comparison in MLflow'
                 />
-              </div>
-            </form>
-            <div className='col-xs-9'>{maybeRenderPlot()}</div>
-          </div>
-        </div>
-      </div>
+              </label>
+              {this.renderSelect('xaxis')}
+            </div>
+            <Spacer size='medium' />
+            <div>
+              <label htmlFor='y-axis-selector'>
+                <FormattedMessage
+                  defaultMessage='Y-axis:'
+                  description='Label text for y-axis in contour plot comparison in MLflow'
+                />
+              </label>
+              {this.renderSelect('yaxis')}
+            </div>
+            <Spacer size='medium' />
+            <div>
+              <label htmlFor='z-axis-selector'>
+                <FormattedMessage
+                  defaultMessage='Z-axis:'
+                  description='Label text for z-axis in contour plot comparison in MLflow'
+                />
+              </label>
+              {this.renderSelect('zaxis')}
+            </div>
+            <Spacer size='medium' />
+            <div className='inline-control'>
+              <FormattedMessage
+                defaultMessage='Reverse color:'
+                description='Label text for reverse color toggle in contour plot comparison
+                      in MLflow'
+              />{' '}
+              <Switch
+                className='show-point-toggle'
+                checked={this.state.reverseColor}
+                onChange={(checked) => this.setState({ reverseColor: checked })}
+              />
+            </div>
+          </>
+        }
+      >
+        {maybeRenderPlot()}
+      </CompareRunPlotContainer>
     );
   }
 
   renderSelect(axis) {
     return (
-      <select
-        className='form-control'
+      <Select
+        css={styles.select}
         id={axis + '-axis-selector'}
         aria-label={`${axis} axis`}
-        onChange={(e) => {
-          const [prefix, ...keyParts] = e.target.value.split('-');
+        onChange={(value) => {
+          const [prefix, ...keyParts] = value.split('-');
           const key = keyParts.join('-');
           const isMetric = prefix === 'metric';
           this.setState({ [axis]: { isMetric, key } });
         }}
         value={(this.state[axis].isMetric ? 'metric-' : 'param-') + this.state[axis].key}
       >
-        <optgroup label='Parameter'>
+        <OptGroup label='Parameter'>
           {this.paramKeys.map((p) => (
-            <option key={'param-' + p} value={'param-' + p}>
+            <Option key={'param-' + p} value={'param-' + p}>
               {p}
-            </option>
+            </Option>
           ))}
-        </optgroup>
-        <optgroup label='Metric'>
+        </OptGroup>
+        <OptGroup label='Metric'>
           {this.metricKeys.map((m) => (
-            <option key={'metric-' + m} value={'metric-' + m}>
+            <Option key={'metric-' + m} value={'metric-' + m}>
               {m}
-            </option>
+            </Option>
           ))}
-        </optgroup>
-      </select>
+        </OptGroup>
+      </Select>
     );
   }
 
@@ -364,6 +346,20 @@ export class CompareRunContour extends Component {
     return result;
   }
 }
+
+const styles = {
+  select: {
+    width: '100%',
+  },
+  plot: {
+    width: '100%',
+  },
+  noDataMessage: (theme) => ({
+    padding: theme.spacing.sm,
+    display: 'flex',
+    justifyContent: 'center',
+  }),
+};
 
 const mapStateToProps = (state, ownProps) => {
   const runInfos = [];

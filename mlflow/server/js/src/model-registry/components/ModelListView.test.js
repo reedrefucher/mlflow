@@ -1,6 +1,7 @@
 import React from 'react';
 import { ModelListView, ModelListViewImpl } from './ModelListView';
 import { mockModelVersionDetailed, mockRegisteredModelDetailed } from '../test-utils';
+import { Alert } from '@databricks/design-system';
 import { ModelVersionStatus, Stages } from '../constants';
 import { BrowserRouter } from 'react-router-dom';
 import Utils from '../../common/utils/Utils';
@@ -14,7 +15,7 @@ import { mountWithIntl } from '../../common/utils/TestUtils';
 
 const mockStore = configureStore([thunk, promiseMiddleware()]);
 
-const ANTD_TABLE_PLACEHOLDER_CLS = '.ant-table-placeholder';
+const ANTD_TABLE_PLACEHOLDER_CLS = 'tr.ant-table-placeholder';
 
 describe('ModelListView', () => {
   let wrapper;
@@ -27,12 +28,13 @@ describe('ModelListView', () => {
     onSearchSpy = jest.fn();
     minimalProps = {
       models: [],
-      nameSearchInput: '',
-      tagSearchInput: '',
+      searchInput: '',
       orderByKey: 'name',
       orderByAsc: true,
       currentPage: 1,
       nextPageToken: null, // no next page
+      selectedStatusFilter: '',
+      selectedOwnerFilter: '',
       onSearch: onSearchSpy,
       onClear: jest.fn(),
       onClickNext: jest.fn(),
@@ -40,6 +42,9 @@ describe('ModelListView', () => {
       onClickSortableColumn: jest.fn(),
       onSetMaxResult: jest.fn(),
       getMaxResultValue: jest.fn().mockReturnValue(10),
+      onSearchInputChange: jest.fn(),
+      onStatusFilterChange: jest.fn(),
+      onOwnerFilterChange: jest.fn(),
     };
     minimalStore = mockStore({});
   });
@@ -62,7 +67,7 @@ describe('ModelListView', () => {
 
   test('should display onBoarding helper', () => {
     wrapper = setupModelListViewWithIntl();
-    expect(wrapper.find('Alert').length).toBe(1);
+    expect(wrapper.find(Alert).length).toBe(1);
   });
 
   test('should not display onBoarding helper if disabled', () => {
@@ -70,7 +75,7 @@ describe('ModelListView', () => {
     wrapper.find(ModelListViewImpl).setState({
       showOnboardingHelper: false,
     });
-    expect(wrapper.find('Alert').length).toBe(0);
+    expect(wrapper.find(Alert).length).toBe(0);
   });
 
   test('should show correct link in onboarding helper', () => {
@@ -87,7 +92,7 @@ describe('ModelListView', () => {
     wrapper.setProps({
       children: (
         <BrowserRouter>
-          <ModelListView {...{ ...minimalProps, nameSearchInput: 'xyz' }} />
+          <ModelListView {...{ ...minimalProps, searchInput: 'xyz' }} />
         </BrowserRouter>
       ),
     });
@@ -136,23 +141,6 @@ describe('ModelListView', () => {
         [
           { key: 'key', value: 'value' },
           { key: 'key2', value: 'value2' },
-        ],
-      ),
-    ];
-    const props = { ...minimalProps, models };
-    wrapper = setupModelListViewWithIntl(props);
-    expect(wrapper.find('td.table-tag-container').text()).toContain('key:value');
-    expect(wrapper.find('td.table-tag-container').text()).toContain('key2:value2');
-  });
-
-  test('tags cell renders multiple tags and collapses with more than 3 tags', () => {
-    const models = [
-      mockRegisteredModelDetailed(
-        'Model A',
-        [],
-        [
-          { key: 'key', value: 'value' },
-          { key: 'key2', value: 'value2' },
           { key: 'key3', value: 'value3' },
           { key: 'key4', value: 'value4' },
         ],
@@ -163,7 +151,29 @@ describe('ModelListView', () => {
     expect(wrapper.find('td.table-tag-container').text()).toContain('key:value');
     expect(wrapper.find('td.table-tag-container').text()).toContain('key2:value2');
     expect(wrapper.find('td.table-tag-container').text()).toContain('key3:value3');
-    expect(wrapper.find('td.table-tag-container').text()).toContain('1 more');
+    expect(wrapper.find('td.table-tag-container').text()).toContain('key4:value4');
+  });
+
+  test('tags cell renders multiple tags and collapses with more than 4 tags', () => {
+    const models = [
+      mockRegisteredModelDetailed(
+        'Model A',
+        [],
+        [
+          { key: 'key', value: 'value' },
+          { key: 'key2', value: 'value2' },
+          { key: 'key3', value: 'value3' },
+          { key: 'key4', value: 'value4' },
+          { key: 'key5', value: 'value5' },
+        ],
+      ),
+    ];
+    const props = { ...minimalProps, models };
+    wrapper = setupModelListViewWithIntl(props);
+    expect(wrapper.find('td.table-tag-container').text()).toContain('key:value');
+    expect(wrapper.find('td.table-tag-container').text()).toContain('key2:value2');
+    expect(wrapper.find('td.table-tag-container').text()).toContain('key3:value3');
+    expect(wrapper.find('td.table-tag-container').text()).toContain('2 more');
   });
 
   test('should render `_` when there are no tags to display for the cell', () => {
@@ -175,38 +185,6 @@ describe('ModelListView', () => {
     const props = { ...minimalProps, models };
     wrapper = setupModelListViewWithIntl(props);
     expect(wrapper.find('td.table-tag-container').text()).toBe('_');
-  });
-
-  test('the name search input is called with nameSearchInput value', () => {
-    wrapper = setupModelListViewWithIntl();
-    wrapper.find(ModelListViewImpl).setState({
-      nameSearchInput: 'xyz',
-    });
-    instance = wrapper.find(ModelListViewImpl).instance();
-    instance.handleSearch({ preventDefault: () => {} });
-    expect(onSearchSpy).toHaveBeenCalledTimes(1);
-    expect(onSearchSpy).toBeCalledWith(
-      'xyz',
-      '',
-      instance.setLoadingFalse,
-      instance.setLoadingFalse,
-    );
-  });
-
-  test('the tag search input is called with tagSearchInput value', () => {
-    wrapper = setupModelListViewWithIntl();
-    wrapper.find(ModelListViewImpl).setState({
-      tagSearchInput: 'tags.key1="value1"',
-    });
-    instance = wrapper.find(ModelListViewImpl).instance();
-    instance.handleSearch({ preventDefault: () => {} });
-    expect(onSearchSpy).toHaveBeenCalledTimes(1);
-    expect(onSearchSpy).toBeCalledWith(
-      '',
-      'tags.key1="value1"',
-      instance.setLoadingFalse,
-      instance.setLoadingFalse,
-    );
   });
 
   const findColumn = (table, index) =>
@@ -232,24 +210,9 @@ describe('ModelListView', () => {
     expect(findColumn(table, 'last_updated_timestamp').sortOrder).toBe(undefined);
     // the table doesn't actually sort, though, and displays exactly what's given.
     expect(wrapper.find('td.model-name').length).toBe(3);
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(0)
-        .text(),
-    ).toBe('Model B');
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(1)
-        .text(),
-    ).toBe('model c');
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(2)
-        .text(),
-    ).toBe('Model a');
+    expect(wrapper.find('td.model-name').at(0).text()).toBe('Model B');
+    expect(wrapper.find('td.model-name').at(1).text()).toBe('model c');
+    expect(wrapper.find('td.model-name').at(2).text()).toBe('Model a');
 
     props = {
       ...minimalProps,
@@ -264,24 +227,9 @@ describe('ModelListView', () => {
     expect(findColumn(table, 'last_updated_timestamp').sortOrder).toBe('descend');
     // the table doesn't actually sort, though, and displays exactly what's given.
     expect(wrapper.find('td.model-name').length).toBe(3);
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(0)
-        .text(),
-    ).toBe('Model B');
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(1)
-        .text(),
-    ).toBe('model c');
-    expect(
-      wrapper
-        .find('td.model-name')
-        .at(2)
-        .text(),
-    ).toBe('Model a');
+    expect(wrapper.find('td.model-name').at(0).text()).toBe('Model B');
+    expect(wrapper.find('td.model-name').at(1).text()).toBe('model c');
+    expect(wrapper.find('td.model-name').at(2).text()).toBe('Model a');
   });
 
   test('lastNavigationActionWasClickPrev is set properly on actions', () => {
@@ -307,31 +255,5 @@ describe('ModelListView', () => {
     expect(mockUpdatePageTitle.mock.calls[0][0]).toBe('MLflow Models');
   });
 
-  test('clear button clears inputs', () => {
-    wrapper = setupModelListViewWithIntl();
-    wrapper.find(ModelListViewImpl).setState({ nameSearchInput: 'xyz' });
-    wrapper.find(ModelListViewImpl).setState({ tagSearchInput: 'tags.k="v"' });
-
-    instance = wrapper.find(ModelListViewImpl).instance();
-    instance.handleClear();
-
-    expect(instance.state.lastNavigationActionWasClickPrev).toBe(false);
-
-    expect(instance.state.nameSearchInput).toBe('');
-    expect(instance.state.tagSearchInput).toBe('');
-  });
-
-  test('search inputs are properly passed to handleSearch', () => {
-    wrapper = setupModelListViewWithIntl();
-    wrapper.find(ModelListViewImpl).setState({ nameSearchInput: 'xyz' });
-    wrapper.find(ModelListViewImpl).setState({ tagSearchInput: 'tags.k="v"' });
-
-    const event = { preventDefault: () => {} };
-    instance = wrapper.find(ModelListViewImpl).instance();
-    instance.handleSearch(event);
-
-    expect(onSearchSpy.mock.calls.length).toBe(1);
-    expect(onSearchSpy.mock.calls[0][0]).toBe('xyz');
-    expect(onSearchSpy.mock.calls[0][1]).toBe('tags.k="v"');
-  });
+  // eslint-disable-next-line
 });

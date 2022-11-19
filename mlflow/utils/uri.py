@@ -164,7 +164,7 @@ def extract_db_type_from_uri(db_uri):
 
 def get_uri_scheme(uri_or_path):
     scheme = urllib.parse.urlparse(uri_or_path).scheme
-    if any([scheme.lower().startswith(db) for db in DATABASE_ENGINES]):
+    if any(scheme.lower().startswith(db) for db in DATABASE_ENGINES):
         return extract_db_type_from_uri(uri_or_path)
     else:
         return scheme
@@ -250,19 +250,6 @@ def is_databricks_model_registry_artifacts_uri(artifact_uri):
     _MODEL_REGISTRY_ARTIFACT_URI = "databricks/mlflow-registry/"
     artifact_uri_path = extract_and_normalize_path(artifact_uri)
     return artifact_uri_path.startswith(_MODEL_REGISTRY_ARTIFACT_URI)
-
-
-def construct_run_url(hostname, experiment_id, run_id, workspace_id=None):
-    if not hostname or not experiment_id or not run_id:
-        raise MlflowException(
-            "Hostname, experiment ID, and run ID are all required to construct" "a run URL"
-        )
-    prefix = hostname
-    if workspace_id and workspace_id != "0":
-        prefix += "?o=" + workspace_id
-    return prefix + "#mlflow/experiments/{experiment_id}/runs/{run_id}".format(
-        experiment_id=experiment_id, run_id=run_id
-    )
 
 
 def is_valid_dbfs_uri(uri):

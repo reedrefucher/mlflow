@@ -12,7 +12,6 @@ from mlflow.protos.model_registry_pb2 import (
     CreateRegisteredModel,
     UpdateRegisteredModel,
     DeleteRegisteredModel,
-    ListRegisteredModels,
     GetRegisteredModel,
     GetLatestVersions,
     CreateModelVersion,
@@ -56,6 +55,21 @@ def mock_http_request(f):
     return wrapper
 
 
+def mock_multiple_http_requests(f):
+    @functools.wraps(f)
+    @mock.patch(
+        "mlflow.utils.rest_utils.http_request",
+        side_effect=[
+            mock.MagicMock(status_code=403, text='{"error_code": "ENDPOINT_NOT_FOUND"}'),
+            mock.MagicMock(status_code=200, text="{}"),
+        ],
+    )
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 @pytest.mark.usefixtures("request_fixture")
 class TestRestStore(unittest.TestCase):
     def setUp(self):
@@ -68,7 +82,7 @@ class TestRestStore(unittest.TestCase):
     def _args(self, host_creds, endpoint, method, json_body):
         res = {
             "host_creds": host_creds,
-            "endpoint": "/api/2.0/preview/mlflow/%s" % endpoint,
+            "endpoint": "/api/2.0/mlflow/%s" % endpoint,
             "method": method,
         }
         if method == "GET":
@@ -78,9 +92,17 @@ class TestRestStore(unittest.TestCase):
         return res
 
     def _verify_requests(self, http_request, endpoint, method, proto_message):
-        print(http_request.call_args_list)
         json_body = message_to_json(proto_message)
         http_request.assert_any_call(**(self._args(self.creds, endpoint, method, json_body)))
+
+    def _verify_all_requests(self, http_request, endpoints, proto_message):
+        json_body = message_to_json(proto_message)
+        http_request.assert_has_calls(
+            [
+                mock.call(**(self._args(self.creds, endpoint, method, json_body)))
+                for endpoint, method in endpoints
+            ]
+        )
 
     @mock_http_request
     def test_create_registered_model(self, mock_http):
@@ -132,16 +154,6 @@ class TestRestStore(unittest.TestCase):
         )
 
     @mock_http_request
-    def test_list_registered_model(self, mock_http):
-        self.store.list_registered_models(max_results=50, page_token=None)
-        self._verify_requests(
-            mock_http,
-            "registered-models/list",
-            "GET",
-            ListRegisteredModels(page_token=None, max_results=50),
-        )
-
-    @mock_http_request
     def test_search_registered_model(self, mock_http):
         self.store.search_registered_models()
         self._verify_requests(
@@ -172,23 +184,24 @@ class TestRestStore(unittest.TestCase):
             mock_http, "registered-models/get", "GET", GetRegisteredModel(name=name)
         )
 
-    @mock_http_request
-    def test_get_latest_versions(self, mock_http):
+    @mock_multiple_http_requests
+    def test_get_latest_versions(self, mock_multiple_http_requests):
         name = "model_1"
         self.store.get_latest_versions(name=name)
-        self._verify_requests(
-            mock_http, "registered-models/get-latest-versions", "GET", GetLatestVersions(name=name)
+        endpoint = "registered-models/get-latest-versions"
+        endpoints = [(endpoint, "POST"), (endpoint, "GET")]
+        self._verify_all_requests(
+            mock_multiple_http_requests, endpoints, GetLatestVersions(name=name)
         )
 
-    @mock_http_request
-    def test_get_latest_versions_with_stages(self, mock_http):
+    @mock_multiple_http_requests
+    def test_get_latest_versions_with_stages(self, mock_multiple_http_requests):
         name = "model_1"
         self.store.get_latest_versions(name=name, stages=["blaah"])
-        self._verify_requests(
-            mock_http,
-            "registered-models/get-latest-versions",
-            "GET",
-            GetLatestVersions(name=name, stages=["blaah"]),
+        endpoint = "registered-models/get-latest-versions"
+        endpoints = [(endpoint, "POST"), (endpoint, "GET")]
+        self._verify_all_requests(
+            mock_multiple_http_requests, endpoints, GetLatestVersions(name=name, stages=["blaah"])
         )
 
     @mock_http_request
@@ -232,7 +245,12 @@ class TestRestStore(unittest.TestCase):
         run_link = "localhost:5000/path/to/run"
         description = "version description"
         self.store.create_model_version(
-            "model_1", "path/to/source", run_id, tags, run_link=run_link, description=description,
+            "model_1",
+            "path/to/source",
+            run_id,
+            tags,
+            run_link=run_link,
+            description=description,
         )
         self._verify_requests(
             mock_http,
@@ -265,7 +283,7 @@ class TestRestStore(unittest.TestCase):
         )
 
     @mock_http_request
-    def test_update_model_version_decription(self, mock_http):
+    def test_update_model_version_description(self, mock_http):
         name = "model_1"
         version = "5"
         description = "test model version"

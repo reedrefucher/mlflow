@@ -22,6 +22,7 @@ import { getModelPageRoute, modelListPageRoute } from '../routes';
 import { getProtoField } from '../utils';
 import { getUUID } from '../../common/utils/ActionUtils';
 import _ from 'lodash';
+import { PageContainer } from '../../common/components/PageContainer';
 
 export class ModelVersionPageImpl extends React.Component {
   static propTypes = {
@@ -169,19 +170,15 @@ export class ModelVersionPageImpl extends React.Component {
   }
 
   render() {
-    const {
-      modelName,
-      version,
-      modelVersion,
-      runInfo,
-      runDisplayName,
-      history,
-      schema,
-    } = this.props;
+    const { modelName, version, modelVersion, runInfo, runDisplayName, history, schema } =
+      this.props;
 
     return (
-      <div className='App-content'>
-        <RequestStateWrapper requestIds={this.state.criticalInitialRequestIds}>
+      <PageContainer>
+        <RequestStateWrapper
+          requestIds={this.state.criticalInitialRequestIds}
+          // eslint-disable-next-line no-trailing-spaces
+        >
           {(loading, hasError, requests) => {
             if (hasError) {
               clearInterval(this.pollIntervalId);
@@ -217,7 +214,7 @@ export class ModelVersionPageImpl extends React.Component {
             return null;
           }}
         </RequestStateWrapper>
-      </div>
+      </PageContainer>
     );
   }
 }
@@ -232,7 +229,7 @@ const mapStateToProps = (state, ownProps) => {
     runInfo = getRunInfo(modelVersion && modelVersion.run_id, state);
   }
   const tags = runInfo && getRunTags(runInfo.getRunUuid(), state);
-  const runDisplayName = tags && Utils.getRunDisplayName(tags, runInfo.getRunUuid());
+  const runDisplayName = tags && Utils.getRunDisplayName(runInfo, runInfo.getRunUuid());
   const { apis } = state;
   return {
     modelName,

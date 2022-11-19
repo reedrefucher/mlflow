@@ -5,9 +5,9 @@ NULL
 metric_value_to_rest <- function(value) {
   if (is.nan(value)) {
     as.character(NaN)
-  } else if (value == Inf) {
+  } else if (is.infinite(value) & value > 0) {
     "Infinity"
-  } else if (value == -Inf) {
+  } else if (is.infinite(value) & value < 0) {
     "-Infinity"
   } else {
     as.character(value)
@@ -258,13 +258,14 @@ mlflow_log_param <- function(key, value, run_id = NULL, client = NULL) {
   c(client, run_id) %<-% resolve_client_and_run_id(client, run_id)
 
   key <- cast_string(key)
-  value <- cast_string(value)
+  value <- cast_string(value, allow_na = TRUE)
+  value <- ifelse(is.na(value), "NA", value)
 
   data <- list(
     run_uuid = run_id,
     run_id = run_id,
     key = key,
-    value = cast_string(value)
+    value = value
   )
   mlflow_rest("runs", "log-parameter", client = client, verb = "POST", data = data)
   mlflow_register_tracking_event("log_param", data)
@@ -427,36 +428,7 @@ mlflow_download_artifacts <- function(path, run_id = NULL, client = NULL) {
 # ' Download Artifacts from URI.
 mlflow_download_artifacts_from_uri <- function(artifact_uri, client = mlflow_client()) {
   result <- mlflow_cli("artifacts", "download", "-u", artifact_uri, echo = FALSE, client = client)
-  gsub("\n", "", result$stdout)
-}
-
-#' List Run Infos
-#'
-#' Returns a tibble whose columns contain run metadata (run ID, etc) for all runs under the
-#' specified experiment.
-#'
-#' @param experiment_id Experiment ID. Attempts to use the active experiment if not specified.
-#' @param run_view_type Run view type.
-#' @template roxlate-client
-#' @export
-mlflow_list_run_infos <- function(run_view_type = c("ACTIVE_ONLY", "DELETED_ONLY", "ALL"),
-                                  experiment_id = NULL, client = NULL) {
-  experiment_id <- resolve_experiment_id(experiment_id)
-  client <- resolve_client(client)
-
-  run_view_type <- match.arg(run_view_type)
-  experiment_ids <- cast_string_list(experiment_id)
-
-  response <- mlflow_rest("runs", "search", client = client, verb = "POST", data = list(
-    experiment_ids = experiment_ids,
-    filter = NULL,
-    run_view_type = run_view_type
-  ))
-
-  run_infos_list <- response$runs %>%
-    purrr::map("info") %>%
-    purrr::map(parse_run_info)
-  do.call("rbind", run_infos_list) %||% data.frame()
+  trimws(result$stdout)
 }
 
 #' Log Artifact

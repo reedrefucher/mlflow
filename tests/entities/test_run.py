@@ -27,6 +27,7 @@ class TestRun(TestRunInfo, TestRunData):
         (
             run_info,
             run_id,
+            run_name,
             experiment_id,
             user_id,
             status,
@@ -43,6 +44,7 @@ class TestRun(TestRunInfo, TestRunData):
         expected_info_dict = {
             "run_uuid": run_id,
             "run_id": run_id,
+            "run_name": run_name,
             "experiment_id": experiment_id,
             "user_id": user_id,
             "status": status,
@@ -51,29 +53,27 @@ class TestRun(TestRunInfo, TestRunData):
             "lifecycle_stage": lifecycle_stage,
             "artifact_uri": artifact_uri,
         }
-        self.assertEqual(
-            run1.to_dictionary(),
-            {
-                "info": expected_info_dict,
-                "data": {
-                    "metrics": {m.key: m.value for m in metrics},
-                    "params": {p.key: p.value for p in params},
-                    "tags": {t.key: t.value for t in tags},
-                },
+        assert run1.to_dictionary() == {
+            "info": expected_info_dict,
+            "data": {
+                "metrics": {m.key: m.value for m in metrics},
+                "params": {p.key: p.value for p in params},
+                "tags": {t.key: t.value for t in tags},
             },
-        )
+        }
 
         proto = run1.to_proto()
         run2 = Run.from_proto(proto)
         self._check_run(run2, run_info, metrics, params, tags)
 
         run3 = Run(run_info, None)
-        self.assertEqual(run3.to_dictionary(), {"info": expected_info_dict})
+        assert run3.to_dictionary() == {"info": expected_info_dict}
 
     def test_string_repr(self):
         run_info = RunInfo(
             run_uuid="hi",
             run_id="hi",
+            run_name="name",
             experiment_id=0,
             user_id="user-id",
             status=RunStatus.FAILED,
@@ -88,13 +88,13 @@ class TestRun(TestRunInfo, TestRunData):
             "<Run: data=<RunData: metrics={'key-0': 0, 'key-1': 1, 'key-2': 2}, "
             "params={}, tags={}>, info=<RunInfo: artifact_uri=None, end_time=1, "
             "experiment_id=0, "
-            "lifecycle_stage='active', run_id='hi', run_uuid='hi', "
+            "lifecycle_stage='active', run_id='hi', run_name='name', run_uuid='hi', "
             "start_time=0, status=4, user_id='user-id'>>"
         )
         assert str(run1) == expected
 
     def test_creating_run_with_absent_info_throws_exception(self):
         run_data = TestRunData._create()[0]
-        with pytest.raises(MlflowException) as no_info_exc:
+        with pytest.raises(MlflowException, match="run_info cannot be None") as no_info_exc:
             Run(None, run_data)
         assert "run_info cannot be None" in str(no_info_exc)

@@ -20,7 +20,6 @@ import posixpath
 
 import mlflow
 import shutil
-import mlflow.pyfunc.utils as pyfunc_utils
 from mlflow import pyfunc
 from mlflow.exceptions import MlflowException
 from mlflow.models import Model, ModelSignature
@@ -29,7 +28,6 @@ from mlflow.models.utils import ModelInputExample, _save_example
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 from mlflow.pytorch import pickle_module as mlflow_pytorch_pickle_module
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
-from mlflow.utils.annotations import experimental
 from mlflow.utils.environment import (
     _mlflow_conda_env,
     _validate_env_arguments,
@@ -38,11 +36,21 @@ from mlflow.utils.environment import (
     _CONDA_ENV_FILE_NAME,
     _REQUIREMENTS_FILE_NAME,
     _CONSTRAINTS_FILE_NAME,
+    _PYTHON_ENV_FILE_NAME,
+    _PythonEnv,
 )
 from mlflow.utils.requirements_utils import _get_pinned_requirement
 from mlflow.utils.docstring_utils import format_docstring, LOG_MODEL_PARAM_DOCS
-from mlflow.utils.file_utils import _copy_file_or_tree, TempDir, write_to
-from mlflow.utils.model_utils import _get_flavor_configuration
+from mlflow.utils.file_utils import (
+    TempDir,
+    write_to,
+)
+from mlflow.utils.model_utils import (
+    _get_flavor_configuration,
+    _validate_and_copy_code_paths,
+    _add_code_from_conf_to_system_path,
+    _validate_and_prepare_target_save_path,
+)
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 from mlflow.utils.autologging_utils import autologging_integration, safe_patch
 
@@ -68,7 +76,6 @@ def get_default_pip_requirements():
             _get_pinned_requirement,
             [
                 "torch",
-                "torchvision",
                 # We include CloudPickle in the default environment because
                 # it's required by the default pickle module used by `save_model()`
                 # and `log_model()`: `mlflow.pytorch.pickle_module`.
@@ -101,9 +108,8 @@ def get_default_conda_env():
 
         conda env {'name': 'mlflow-env',
                    'channels': ['conda-forge'],
-                   'dependencies': ['python=3.7.5',
+                   'dependencies': ['python=3.8.15',
                                     {'pip': ['torch==1.5.1',
-                                             'torchvision==0.6.1',
                                              'mlflow',
                                              'cloudpickle==1.6.0']}]}
     """
@@ -125,10 +131,19 @@ def log_model(
     extra_files=None,
     pip_requirements=None,
     extra_pip_requirements=None,
-    **kwargs
+    **kwargs,
 ):
     """
     Log a PyTorch model as an MLflow artifact for the current run.
+
+        .. warning::
+
+            Log the model with a signature to avoid inference errors.
+            If the model is logged without a signature, the MLflow Model Server relies on the
+            default inferred data type from NumPy. However, PyTorch often expects different
+            defaults, particularly when parsing floats. You must include the signature to ensure
+            that the model is logged with the correct data type so that the MLflow model server
+            can correctly provide valid input.
 
     :param pytorch_model: PyTorch model to be saved. Can be either an eager model (subclass of
                           ``torch.nn.Module``) or scripted model prepared via ``torch.jit.script``
@@ -211,6 +226,8 @@ def log_model(
     :param pip_requirements: {{ pip_requirements }}
     :param extra_pip_requirements: {{ extra_pip_requirements }}
     :param kwargs: kwargs to pass to ``torch.save`` method.
+    :return: A :py:class:`ModelInfo <mlflow.models.model.ModelInfo>` instance that contains the
+             metadata of the logged model.
 
     .. code-block:: python
         :caption: Example
@@ -221,7 +238,7 @@ def log_model(
 
         class LinearNNModel(torch.nn.Module):
             def __init__(self):
-                super(LinearNNModel, self).__init__()
+                super().__init__()
                 self.linear = torch.nn.Linear(1, 1)  # One in and one out
 
             def forward(self, x):
@@ -285,7 +302,7 @@ def log_model(
         PyTorch logged models
     """
     pickle_module = pickle_module or mlflow_pytorch_pickle_module
-    Model.log(
+    return Model.log(
         artifact_path=artifact_path,
         flavor=mlflow.pytorch,
         pytorch_model=pytorch_model,
@@ -318,7 +335,7 @@ def save_model(
     extra_files=None,
     pip_requirements=None,
     extra_pip_requirements=None,
-    **kwargs
+    **kwargs,
 ):
     """
     Save a PyTorch model to a path on the local file system.
@@ -459,25 +476,23 @@ def save_model(
 
     if not isinstance(pytorch_model, torch.nn.Module):
         raise TypeError("Argument 'pytorch_model' should be a torch.nn.Module")
-    if code_paths is not None:
-        if not isinstance(code_paths, list):
-            raise TypeError("Argument code_paths should be a list, not {}".format(type(code_paths)))
     path = os.path.abspath(path)
-    if os.path.exists(path):
-        raise RuntimeError("Path '{}' already exists".format(path))
+    _validate_and_prepare_target_save_path(path)
 
     if mlflow_model is None:
         mlflow_model = Model()
 
-    os.makedirs(path)
     if signature is not None:
         mlflow_model.signature = signature
     if input_example is not None:
         _save_example(mlflow_model, input_example, path)
 
+    code_dir_subpath = _validate_and_copy_code_paths(code_paths, path)
+
     model_data_subpath = "data"
     model_data_path = os.path.join(path, model_data_subpath)
     os.makedirs(model_data_path)
+
     # Persist the pickle module name as a file in the model's `data` directory. This is necessary
     # because the `data` directory is the only available parameter to `_load_pyfunc`, and it
     # does not contain the MLmodel configuration; therefore, it is not sufficient to place
@@ -507,10 +522,11 @@ def save_model(
                 _download_artifact_from_uri(
                     artifact_uri=extra_file, output_path=tmp_extra_files_dir.path()
                 )
-                rel_path = posixpath.join(_EXTRA_FILES_KEY, os.path.basename(extra_file),)
+                rel_path = posixpath.join(_EXTRA_FILES_KEY, os.path.basename(extra_file))
                 torchserve_artifacts_config[_EXTRA_FILES_KEY].append({"path": rel_path})
             shutil.move(
-                tmp_extra_files_dir.path(), posixpath.join(path, _EXTRA_FILES_KEY),
+                tmp_extra_files_dir.path(),
+                posixpath.join(path, _EXTRA_FILES_KEY),
             )
 
     if requirements_file:
@@ -532,17 +548,11 @@ def save_model(
             torchserve_artifacts_config[_REQUIREMENTS_FILE_KEY] = {"path": rel_path}
             shutil.move(tmp_requirements_dir.path(rel_path), path)
 
-    if code_paths is not None:
-        code_dir_subpath = "code"
-        for code_path in code_paths:
-            _copy_file_or_tree(src=code_path, dst=path, dst_dir=code_dir_subpath)
-    else:
-        code_dir_subpath = None
-
     mlflow_model.add_flavor(
         FLAVOR_NAME,
         model_data=model_data_subpath,
         pytorch_version=str(torch.__version__),
+        code=code_dir_subpath,
         **torchserve_artifacts_config,
     )
     pyfunc.add_to_model(
@@ -551,7 +561,8 @@ def save_model(
         data=model_data_subpath,
         pickle_module_name=pickle_module.__name__,
         code=code_dir_subpath,
-        env=_CONDA_ENV_FILE_NAME,
+        conda_env=_CONDA_ENV_FILE_NAME,
+        python_env=_PYTHON_ENV_FILE_NAME,
     )
     mlflow_model.save(os.path.join(path, MLMODEL_FILE_NAME))
 
@@ -561,13 +572,17 @@ def save_model(
             # To ensure `_load_pyfunc` can successfully load the model during the dependency
             # inference, `mlflow_model.save` must be called beforehand to save an MLmodel file.
             inferred_reqs = mlflow.models.infer_pip_requirements(
-                model_data_path, FLAVOR_NAME, fallback=default_reqs,
+                model_data_path,
+                FLAVOR_NAME,
+                fallback=default_reqs,
             )
             default_reqs = sorted(set(inferred_reqs).union(default_reqs))
         else:
             default_reqs = None
         conda_env, pip_requirements, pip_constraints = _process_pip_requirements(
-            default_reqs, pip_requirements, extra_pip_requirements,
+            default_reqs,
+            pip_requirements,
+            extra_pip_requirements,
         )
     else:
         conda_env, pip_requirements, pip_constraints = _process_conda_env(conda_env)
@@ -582,6 +597,8 @@ def save_model(
     if not requirements_file:
         # Save `requirements.txt`
         write_to(os.path.join(path, _REQUIREMENTS_FILE_NAME), "\n".join(pip_requirements))
+
+    _PythonEnv.current().to_yaml(os.path.join(path, _PYTHON_ENV_FILE_NAME))
 
 
 def _load_model(path, **kwargs):
@@ -630,7 +647,9 @@ def _load_model(path, **kwargs):
             return torch.load(model_path, **kwargs)
         except Exception:
             # If fails, assume the model as a scripted model
-            return torch.jit.load(model_path)
+            # `torch.jit.load` does not accept `pickle_module`.
+            kwargs.pop("pickle_module", None)
+            return torch.jit.load(model_path, **kwargs)
 
 
 def load_model(model_uri, dst_path=None, **kwargs):
@@ -694,19 +713,9 @@ def load_model(model_uri, dst_path=None, **kwargs):
     import torch
 
     local_model_path = _download_artifact_from_uri(artifact_uri=model_uri, output_path=dst_path)
-    try:
-        pyfunc_conf = _get_flavor_configuration(
-            model_path=local_model_path, flavor_name=pyfunc.FLAVOR_NAME
-        )
-    except MlflowException:
-        pyfunc_conf = {}
-    code_subpath = pyfunc_conf.get(pyfunc.CODE)
-    if code_subpath is not None:
-        pyfunc_utils._add_code_to_system_path(
-            code_path=os.path.join(local_model_path, code_subpath)
-        )
-
     pytorch_conf = _get_flavor_configuration(model_path=local_model_path, flavor_name=FLAVOR_NAME)
+    _add_code_from_conf_to_system_path(local_model_path, pytorch_conf)
+
     if torch.__version__ != pytorch_conf["pytorch_version"]:
         _logger.warning(
             "Stored model version '%s' does not match installed PyTorch version '%s'",
@@ -719,14 +728,14 @@ def load_model(model_uri, dst_path=None, **kwargs):
 
 def _load_pyfunc(path, **kwargs):
     """
-    Load PyFunc implementation. Called by ``pyfunc.load_pyfunc``.
+    Load PyFunc implementation. Called by ``pyfunc.load_model``.
 
     :param path: Local filesystem path to the MLflow Model with the ``pytorch`` flavor.
     """
     return _PyTorchWrapper(_load_model(path, **kwargs))
 
 
-class _PyTorchWrapper(object):
+class _PyTorchWrapper:
     """
     Wrapper class that creates a predict function such that
     predict(data: pd.DataFrame) -> model's output as pd.DataFrame (pandas DataFrame)
@@ -768,7 +777,6 @@ class _PyTorchWrapper(object):
             return predicted
 
 
-@experimental
 def log_state_dict(state_dict, artifact_path, **kwargs):
     """
     Log a state_dict as an MLflow artifact for the current run.
@@ -806,7 +814,6 @@ def log_state_dict(state_dict, artifact_path, **kwargs):
         mlflow.log_artifacts(local_path, artifact_path)
 
 
-@experimental
 def save_state_dict(state_dict, path, **kwargs):
     """
     Save a state_dict to a path on the local file system
@@ -832,7 +839,6 @@ def save_state_dict(state_dict, path, **kwargs):
     torch.save(state_dict, state_dict_path, **kwargs)
 
 
-@experimental
 def load_state_dict(state_dict_uri, **kwargs):
     """
     Load a state_dict from a local file or a run.
@@ -868,15 +874,16 @@ def load_state_dict(state_dict_uri, **kwargs):
     return torch.load(state_dict_path, **kwargs)
 
 
-@experimental
 @autologging_integration(FLAVOR_NAME)
 def autolog(
     log_every_n_epoch=1,
+    log_every_n_step=None,
     log_models=True,
     disable=False,
     exclusive=False,
     disable_for_unsupported_versions=False,
     silent=False,
+    registered_model_name=None,
 ):  # pylint: disable=unused-argument
     """
     Enables (or disables) and configures autologging from `PyTorch Lightning
@@ -900,6 +907,9 @@ def autolog(
 
     :param log_every_n_epoch: If specified, logs metrics once every `n` epochs. By default, metrics
                        are logged after every epoch.
+    :param log_every_n_step: If specified, logs batch metrics once every `n` global step.
+                       By default, metrics are not logged for steps. Note that setting this to 1 can
+                       cause performance issues and is not recommended.
     :param log_models: If ``True``, trained models are logged as MLflow model artifacts.
                        If ``False``, trained models are not logged.
     :param disable: If ``True``, disables the PyTorch Lightning autologging integration.
@@ -913,6 +923,9 @@ def autolog(
     :param silent: If ``True``, suppress all event logs and warnings from MLflow during PyTorch
                    Lightning autologging. If ``False``, show all events and warnings during
                    PyTorch Lightning autologging.
+    :param registered_model_name: If given, each time a model is trained, it is registered as a
+                                  new model version of the registered model with this name.
+                                  The registered model is created if it does not already exist.
 
     .. code-block:: python
         :caption: Example
@@ -932,7 +945,7 @@ def autolog(
             from pytorch_lightning.metrics.functional import accuracy
 
         import mlflow.pytorch
-        from mlflow.tracking import MlflowClient
+        from mlflow import MlflowClient
 
         # For brevity, here is the simplest most minimal example with just a training
         # loop step, (no validation, no testing). It illustrates how you can use MLflow
@@ -940,7 +953,7 @@ def autolog(
 
         class MNISTModel(pl.LightningModule):
             def __init__(self):
-                super(MNISTModel, self).__init__()
+                super().__init__()
                 self.l1 = torch.nn.Linear(28 * 28, 10)
 
             def forward(self, x):
@@ -948,8 +961,10 @@ def autolog(
 
             def training_step(self, batch, batch_nb):
                 x, y = batch
-                loss = F.cross_entropy(self(x), y)
-                acc = accuracy(loss, y)
+                logits = self(x)
+                loss = F.cross_entropy(logits, y)
+                pred = logits.argmax(dim=1)
+                acc = accuracy(pred, y)
 
                 # Use the current of PyTorch logger
                 self.log("train_loss", loss, on_epoch=True)

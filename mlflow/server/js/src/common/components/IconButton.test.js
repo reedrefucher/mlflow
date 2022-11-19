@@ -1,6 +1,6 @@
 import React from 'react';
 import { shallow, mount } from 'enzyme';
-import { Button, Icon } from 'antd';
+import { Button } from '@databricks/design-system';
 import { IconButton } from './IconButton';
 
 describe('IconButton', () => {
@@ -9,7 +9,7 @@ describe('IconButton', () => {
   let minimalProps;
 
   beforeEach(() => {
-    minimalProps = { icon: <Icon type='edit' /> };
+    minimalProps = { icon: () => <span /> };
   });
 
   test('should render with minimal props without exploding', () => {

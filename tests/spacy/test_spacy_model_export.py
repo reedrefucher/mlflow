@@ -1,11 +1,14 @@
 import os
+from pathlib import Path
 import random
 from collections import namedtuple
 from packaging.version import Version
+from unittest import mock
 
 import pandas as pd
 import pytest
 import spacy
+import json
 import yaml
 from spacy.util import compounding, minibatch
 
@@ -28,14 +31,17 @@ from tests.helper_functions import (
     _assert_pip_requirements,
     _is_available_on_pypi,
     allow_infer_pip_requirements_fallback_if,
+    _compare_logged_code_paths,
 )
 
-EXTRA_PYFUNC_SERVING_TEST_ARGS = [] if _is_available_on_pypi("spacy") else ["--no-conda"]
+EXTRA_PYFUNC_SERVING_TEST_ARGS = (
+    [] if _is_available_on_pypi("spacy") else ["--env-manager", "local"]
+)
 
 ModelWithData = namedtuple("ModelWithData", ["model", "inference_data"])
 
-
-IS_SPACY_VERSION_NEWER_THAN_OR_EQUAL_TO_3_0_0 = Version(spacy.__version__) >= Version("3.0.0")
+spacy_version = Version(spacy.__version__)
+IS_SPACY_VERSION_NEWER_THAN_OR_EQUAL_TO_3_0_0 = spacy_version >= Version("3.0.0")
 
 
 @pytest.fixture(scope="module")
@@ -87,7 +93,6 @@ def model_path(tmpdir):
     return os.path.join(str(tmpdir), "model")
 
 
-@pytest.mark.large
 def test_model_save_load(spacy_model_with_data, model_path):
     spacy_model = spacy_model_with_data.model
     mlflow.spacy.save_model(spacy_model=spacy_model, path=model_path)
@@ -101,21 +106,19 @@ def test_model_save_load(spacy_model_with_data, model_path):
     assert spacy_model.meta == loaded_model.meta
 
     # Load pyfunc model using saved model and asserting its predictions are equal to the created one
-    pyfunc_loaded = mlflow.pyfunc.load_pyfunc(model_path)
+    pyfunc_loaded = mlflow.pyfunc.load_model(model_path)
     assert all(
         _predict(spacy_model, spacy_model_with_data.inference_data)
         == pyfunc_loaded.predict(spacy_model_with_data.inference_data)
     )
 
 
-@pytest.mark.large
 def test_model_export_with_schema_and_examples(spacy_model_with_data):
     spacy_model = spacy_model_with_data.model
     signature_ = infer_signature(spacy_model_with_data.inference_data)
     example_ = spacy_model_with_data.inference_data.head(3)
     for signature in (None, signature_):
         for example in (None, example_):
-            print(signature is None, example is None)
             with TempDir() as tmp:
                 path = tmp.path("model")
                 mlflow.spacy.save_model(
@@ -129,14 +132,13 @@ def test_model_export_with_schema_and_examples(spacy_model_with_data):
                     assert all((_read_example(mlflow_model, path) == example).all())
 
 
-@pytest.mark.large
 def test_predict_df_with_wrong_shape(spacy_model_with_data, model_path):
     mlflow.spacy.save_model(spacy_model=spacy_model_with_data.model, path=model_path)
-    pyfunc_loaded = mlflow.pyfunc.load_pyfunc(model_path)
+    pyfunc_loaded = mlflow.pyfunc.load_model(model_path)
 
     # Concatenating with itself to duplicate column and mess up input shape
     # then asserting n MlflowException is raised
-    with pytest.raises(MlflowException):
+    with pytest.raises(MlflowException, match="Shape of input dataframe must be"):
         pyfunc_loaded.predict(
             pd.concat(
                 [spacy_model_with_data.inference_data, spacy_model_with_data.inference_data], axis=1
@@ -144,7 +146,6 @@ def test_predict_df_with_wrong_shape(spacy_model_with_data, model_path):
         )
 
 
-@pytest.mark.large
 def test_model_log(spacy_model_with_data, tracking_uri_mock):  # pylint: disable=unused-argument
     spacy_model = spacy_model_with_data.model
     old_uri = mlflow.get_tracking_uri()
@@ -155,10 +156,13 @@ def test_model_log(spacy_model_with_data, tracking_uri_mock):  # pylint: disable
                 artifact_path = "model"
                 if should_start_run:
                     mlflow.start_run()
-                mlflow.spacy.log_model(spacy_model=spacy_model, artifact_path=artifact_path)
+                model_info = mlflow.spacy.log_model(
+                    spacy_model=spacy_model, artifact_path=artifact_path
+                )
                 model_uri = "runs:/{run_id}/{artifact_path}".format(
                     run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
                 )
+                assert model_info.model_uri == model_uri
 
                 # Load model
                 spacy_model_loaded = mlflow.spacy.load_model(model_uri=model_uri)
@@ -171,7 +175,6 @@ def test_model_log(spacy_model_with_data, tracking_uri_mock):  # pylint: disable
                 mlflow.set_tracking_uri(old_uri)
 
 
-@pytest.mark.large
 def test_model_save_persists_requirements_in_mlflow_model_directory(
     spacy_model_with_data, model_path, spacy_custom_env
 ):
@@ -183,7 +186,6 @@ def test_model_save_persists_requirements_in_mlflow_model_directory(
     _compare_conda_env_requirements(spacy_custom_env, saved_pip_req_path)
 
 
-@pytest.mark.large
 def test_save_model_with_pip_requirements(spacy_model_with_data, tmpdir):
     # Path to a requirements file
     tmpdir1 = tmpdir.join("1")
@@ -215,7 +217,6 @@ def test_save_model_with_pip_requirements(spacy_model_with_data, tmpdir):
     )
 
 
-@pytest.mark.large
 def test_save_model_with_extra_pip_requirements(spacy_model_with_data, tmpdir):
     default_reqs = mlflow.spacy.get_default_pip_requirements()
 
@@ -249,7 +250,6 @@ def test_save_model_with_extra_pip_requirements(spacy_model_with_data, tmpdir):
     )
 
 
-@pytest.mark.large
 def test_model_save_persists_specified_conda_env_in_mlflow_model_directory(
     spacy_model_with_data, model_path, spacy_custom_env
 ):
@@ -258,7 +258,7 @@ def test_model_save_persists_specified_conda_env_in_mlflow_model_directory(
     )
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
-    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV])
+    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
     assert os.path.exists(saved_conda_env_path)
     assert saved_conda_env_path != spacy_custom_env
 
@@ -269,7 +269,6 @@ def test_model_save_persists_specified_conda_env_in_mlflow_model_directory(
     assert saved_conda_env_text == spacy_custom_env_text
 
 
-@pytest.mark.large
 def test_model_save_accepts_conda_env_as_dict(spacy_model_with_data, model_path):
     conda_env = dict(mlflow.spacy.get_default_conda_env())
     conda_env["dependencies"].append("pytest")
@@ -278,7 +277,7 @@ def test_model_save_accepts_conda_env_as_dict(spacy_model_with_data, model_path)
     )
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
-    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV])
+    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
     assert os.path.exists(saved_conda_env_path)
 
     with open(saved_conda_env_path, "r") as f:
@@ -286,7 +285,6 @@ def test_model_save_accepts_conda_env_as_dict(spacy_model_with_data, model_path)
     assert saved_conda_env_parsed == conda_env
 
 
-@pytest.mark.large
 def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
     spacy_model_with_data, spacy_custom_env
 ):
@@ -304,7 +302,7 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
         )
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
-    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV])
+    saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
     assert os.path.exists(saved_conda_env_path)
     assert saved_conda_env_path != spacy_custom_env
 
@@ -315,7 +313,6 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
     assert saved_conda_env_text == spacy_custom_env_text
 
 
-@pytest.mark.large
 def test_model_log_persists_requirements_in_mlflow_model_directory(
     spacy_model_with_data, spacy_custom_env
 ):
@@ -336,7 +333,6 @@ def test_model_log_persists_requirements_in_mlflow_model_directory(
     _compare_conda_env_requirements(spacy_custom_env, saved_pip_req_path)
 
 
-@pytest.mark.large
 def test_model_save_without_specified_conda_env_uses_default_env_with_expected_dependencies(
     spacy_model_with_data, model_path
 ):
@@ -344,7 +340,6 @@ def test_model_save_without_specified_conda_env_uses_default_env_with_expected_d
     _assert_pip_requirements(model_path, mlflow.spacy.get_default_pip_requirements())
 
 
-@pytest.mark.large
 def test_model_log_without_specified_conda_env_uses_default_env_with_expected_dependencies(
     spacy_model_with_data,
 ):
@@ -355,7 +350,6 @@ def test_model_log_without_specified_conda_env_uses_default_env_with_expected_de
     _assert_pip_requirements(model_uri, mlflow.spacy.get_default_pip_requirements())
 
 
-@pytest.mark.large
 def test_model_log_with_pyfunc_flavor(spacy_model_with_data):
     artifact_path = "model"
     with mlflow.start_run():
@@ -370,7 +364,6 @@ def test_model_log_with_pyfunc_flavor(spacy_model_with_data):
         assert pyfunc.FLAVOR_NAME in loaded_model.flavors
 
 
-@pytest.mark.large
 # In this test, `infer_pip_requirements` fails to load a spacy model for spacy < 3.0.0 due to:
 # https://github.com/explosion/spaCy/issues/4658
 @allow_infer_pip_requirements_fallback_if(not IS_SPACY_VERSION_NEWER_THAN_OR_EQUAL_TO_3_0_0)
@@ -398,22 +391,39 @@ def test_model_log_without_pyfunc_flavor():
         assert loaded_model.flavors.keys() == {"spacy"}
 
 
-@pytest.mark.large
 def test_pyfunc_serve_and_score(spacy_model_with_data):
     model, inference_dataframe = spacy_model_with_data
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.spacy.log_model(model, artifact_path)
+        if spacy_version <= Version("3.0.8"):
+            extra_pip_requirements = ["click<8.1.0", "flask<2.1.0"]
+        elif spacy_version < Version("3.2.4"):
+            extra_pip_requirements = ["click<8.1.0"]
+        else:
+            extra_pip_requirements = None
+        mlflow.spacy.log_model(model, artifact_path, extra_pip_requirements=extra_pip_requirements)
         model_uri = mlflow.get_artifact_uri(artifact_path)
 
     resp = pyfunc_serve_and_score_model(
         model_uri,
         data=inference_dataframe,
-        content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON_SPLIT_ORIENTED,
+        content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    scores = pd.read_json(resp.content, orient="records")
+    scores = pd.DataFrame(data=json.loads(resp.content.decode("utf-8"))["predictions"])
     pd.testing.assert_frame_equal(scores, _predict(model, inference_dataframe))
+
+
+def test_log_model_with_code_paths(spacy_model_with_data):
+    artifact_path = "model"
+    with mlflow.start_run(), mock.patch(
+        "mlflow.spacy._add_code_from_conf_to_system_path"
+    ) as add_mock:
+        mlflow.spacy.log_model(spacy_model_with_data.model, artifact_path, code_paths=[__file__])
+        model_uri = mlflow.get_artifact_uri(artifact_path)
+        _compare_logged_code_paths(__file__, model_uri, mlflow.spacy.FLAVOR_NAME)
+        mlflow.spacy.load_model(model_uri)
+        add_mock.assert_called()
 
 
 def _train_model(nlp, train_data, n_iter=5):
@@ -451,3 +461,11 @@ def _predict(spacy_model, test_x):
     return pd.DataFrame(
         {"predictions": test_x.iloc[:, 0].apply(lambda text: spacy_model(text).cats)}
     )
+
+
+def test_virtualenv_subfield_points_to_correct_path(spacy_model_with_data, model_path):
+    mlflow.spacy.save_model(spacy_model_with_data.model, path=model_path)
+    pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
+    python_env_path = Path(model_path, pyfunc_conf[pyfunc.ENV]["virtualenv"])
+    assert python_env_path.exists()
+    assert python_env_path.is_file()

@@ -45,9 +45,7 @@ To run this tutorial, you'll need to:
 
     .. container:: R
 
-       - Install `conda <https://conda.io/projects/conda/en/latest/user-guide/install/index.html>`_
        - Install the MLflow package (via ``install.packages("mlflow")``)
-       - Install MLflow (via ``mlflow::install_mlflow()``)
        - Clone (download) the MLflow repository via ``git clone https://github.com/mlflow/mlflow``
        - ``setwd()`` into the ``examples`` directory within your clone of MLflow - we'll use this
          working directory for running the tutorial. We avoid running directly from our clone of
@@ -65,7 +63,7 @@ First, train a linear regression model that takes two hyperparameters: ``alpha``
   .. container:: python
 
     The code is located at ``examples/sklearn_elasticnet_wine/train.py`` and is reproduced below.
-    
+
     .. literalinclude:: ../../../examples/sklearn_elasticnet_wine/train.py
 
     This example uses the familiar pandas, numpy, and sklearn APIs to create a simple machine learning
@@ -128,7 +126,7 @@ Comparing the Models
 --------------------
 
 
-Next, use the MLflow UI to compare the models that you have produced. In the same current working directory 
+Next, use the MLflow UI to compare the models that you have produced. In the same current working directory
 as the one that contains the ``mlruns`` run:
 
 .. code-section::
@@ -301,10 +299,10 @@ in MLflow saved the model as an artifact within the run.
       .. code-block:: bash
 
           # On Linux and macOS
-          curl -X POST -H "Content-Type:application/json; format=pandas-split" --data '{"columns":["alcohol", "chlorides", "citric acid", "density", "fixed acidity", "free sulfur dioxide", "pH", "residual sugar", "sulphates", "total sulfur dioxide", "volatile acidity"],"data":[[12.8, 0.029, 0.48, 0.98, 6.2, 29, 3.33, 1.2, 0.39, 75, 0.66]]}' http://127.0.0.1:1234/invocations
+          curl -X POST -H "Content-Type:application/json" --data '{"dataframe_split": {"columns":["alcohol", "chlorides", "citric acid", "density", "fixed acidity", "free sulfur dioxide", "pH", "residual sugar", "sulphates", "total sulfur dioxide", "volatile acidity"],"data":[[12.8, 0.029, 0.48, 0.98, 6.2, 29, 3.33, 1.2, 0.39, 75, 0.66]]}}' http://127.0.0.1:1234/invocations
 
           # On Windows
-          curl -X POST -H "Content-Type:application/json; format=pandas-split" --data "{\"columns\":[\"alcohol\", \"chlorides\", \"citric acid\", \"density\", \"fixed acidity\", \"free sulfur dioxide\", \"pH\", \"residual sugar\", \"sulphates\", \"total sulfur dioxide\", \"volatile acidity\"],\"data\":[[12.8, 0.029, 0.48, 0.98, 6.2, 29, 3.33, 1.2, 0.39, 75, 0.66]]}" http://127.0.0.1:1234/invocations
+          curl -X POST -H "Content-Type:application/json" --data "{\"dataframe_split\": {\"columns\":[\"alcohol\", \"chlorides\", \"citric acid\", \"density\", \"fixed acidity\", \"free sulfur dioxide\", \"pH\", \"residual sugar\", \"sulphates\", \"total sulfur dioxide\", \"volatile acidity\"],\"data\":[[12.8, 0.029, 0.48, 0.98, 6.2, 29, 3.33, 1.2, 0.39, 75, 0.66]]}}" http://127.0.0.1:1234/invocations
 
       the server should respond with output similar to::
 
@@ -383,11 +381,11 @@ in MLflow saved the model as an artifact within the run.
 
         [[6.4287492410792]]
 
-Deploy the Model to Seldon Core or KServe (experimental)
---------------------------------------------------------
+Deploy the Model to Seldon Core or KServe
+-----------------------------------------
 
 After training and testing our model, we are now ready to deploy it to
-production. 
+production.
 MLflow allows you to :ref:`serve your model using
 MLServer<serving_with_mlserver>`, which is already used as the core Python
 inference server in Kubernetes-native frameworks including `Seldon Core
@@ -397,13 +395,8 @@ Therefore, we can leverage this support to build a Docker image compatible with
 these frameworks.
 
 .. note::
-  Note that this an **optional step**, which is currently only available for
-  Python models.
-  Besides this, it's also worth noting that:
-
-  - This feature is **experimental** and is subject to change.
-  - MLServer requires **Python 3.7** or above.
-  - This step requires some basic Kubernetes knowledge, including familiarity with ``kubectl``.
+  This an **optional step**, which is currently only available for Python models. This step also
+  requires some basic Kubernetes knowledge, including familiarity with ``kubectl``.
 
 To build a Docker image containing our model, we can use the ``mlflow models
 build-docker`` subcommand, alongside the ``--enable-mlserver`` flag.
@@ -417,7 +410,7 @@ For example, to build a image named ``my-docker-image``, we could do:
     --enable-mlserver
 
 Once we have our image built, the next step will be to deploy it to our
-cluster. 
+cluster.
 One way to do this is by applying the respective Kubernetes manifests through
 the ``kubectl`` CLI:
 
@@ -442,10 +435,9 @@ the ``kubectl`` CLI:
         metadata:
           name: mlflow-model
         spec:
+          protocol: v2
           predictors:
             - name: default
-              annotations:
-                seldon.io/no-engine: "true"
               graph:
                 name: mlflow-model
                 type: MODEL
@@ -454,16 +446,6 @@ the ``kubectl`` CLI:
                     containers:
                       - name: mlflow-model
                         image: my-docker-image
-                        imagePullPolicy: IfNotPresent
-                        securityContext:
-                          runAsUser: 0
-                        ports:
-                          - containerPort: 8080
-                            name: http
-                            protocol: TCP
-                          - containerPort: 8081
-                            name: grpc
-                            protocol: TCP
 
     .. container:: KServe
 

@@ -6,7 +6,6 @@ from mlflow.protos.model_registry_pb2 import (
     CreateRegisteredModel,
     UpdateRegisteredModel,
     DeleteRegisteredModel,
-    ListRegisteredModels,
     GetLatestVersions,
     CreateModelVersion,
     UpdateModelVersion,
@@ -28,12 +27,14 @@ from mlflow.store.model_registry.abstract_store import AbstractStore
 from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.rest_utils import (
     call_endpoint,
+    call_endpoints,
     extract_api_info_for_service,
+    extract_all_api_info_for_service,
     _REST_API_PATH_PREFIX,
 )
 
 _METHOD_TO_INFO = extract_api_info_for_service(ModelRegistryService, _REST_API_PATH_PREFIX)
-
+_METHOD_TO_ALL_INFO = extract_all_api_info_for_service(ModelRegistryService, _REST_API_PATH_PREFIX)
 
 _logger = logging.getLogger(__name__)
 
@@ -52,10 +53,14 @@ class RestStore(AbstractStore):
         super().__init__()
         self.get_host_creds = get_host_creds
 
-    def _call_endpoint(self, api, json_body):
-        endpoint, method = _METHOD_TO_INFO[api]
+    def _call_endpoint(self, api, json_body, call_all_endpoints=False):
         response_proto = api.Response()
-        return call_endpoint(self.get_host_creds(), endpoint, method, json_body, response_proto)
+        if call_all_endpoints:
+            endpoints = _METHOD_TO_ALL_INFO[api]
+            return call_endpoints(self.get_host_creds(), endpoints, json_body, response_proto)
+        else:
+            endpoint, method = _METHOD_TO_INFO[api]
+            return call_endpoint(self.get_host_creds(), endpoint, method, json_body, response_proto)
 
     # CRUD API for RegisteredModel objects
 
@@ -112,29 +117,6 @@ class RestStore(AbstractStore):
         req_body = message_to_json(DeleteRegisteredModel(name=name))
         self._call_endpoint(DeleteRegisteredModel, req_body)
 
-    def list_registered_models(self, max_results, page_token):
-        """
-        List of all registered models.
-
-        :param max_results: Maximum number of registered models desired.
-        :param page_token: Token specifying the next page of results. It should be obtained from
-                            a ``list_registered_models`` call.
-        :return: A PagedList of :py:class:`mlflow.entities.model_registry.RegisteredModel` objects
-                that satisfy the search expressions. The pagination token for the next page can be
-                obtained via the ``token`` attribute of the object.
-        """
-        req_body = message_to_json(
-            ListRegisteredModels(page_token=page_token, max_results=max_results)
-        )
-        response_proto = self._call_endpoint(ListRegisteredModels, req_body)
-        return PagedList(
-            [
-                RegisteredModel.from_proto(registered_model)
-                for registered_model in response_proto.registered_models
-            ],
-            response_proto.next_page_token,
-        )
-
     def search_registered_models(
         self, filter_string=None, max_results=None, order_by=None, page_token=None
     ):
@@ -184,11 +166,11 @@ class RestStore(AbstractStore):
 
         :param name: Registered model name.
         :param stages: List of desired stages. If input list is None, return latest versions for
-                       for 'Staging' and 'Production' stages.
+                       each stage.
         :return: List of :py:class:`mlflow.entities.model_registry.ModelVersion` objects.
         """
         req_body = message_to_json(GetLatestVersions(name=name, stages=stages))
-        response_proto = self._call_endpoint(GetLatestVersions, req_body)
+        response_proto = self._call_endpoint(GetLatestVersions, req_body, call_all_endpoints=True)
         return [
             ModelVersion.from_proto(model_version)
             for model_version in response_proto.model_versions
@@ -254,9 +236,9 @@ class RestStore(AbstractStore):
 
         :param name: Registered model name.
         :param version: Registered model version.
-        :param new_stage: New desired stage for this model version.
+        :param stage: New desired stage for this model version.
         :param archive_existing_versions: If this flag is set to ``True``, all existing model
-            versions in the stage will be automically moved to the "archived" stage. Only valid
+            versions in the stage will be automatically moved to the "archived" stage. Only valid
             when ``stage`` is ``"staging"`` or ``"production"`` otherwise an error will be raised.
 
         :return: A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.

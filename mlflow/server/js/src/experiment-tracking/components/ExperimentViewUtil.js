@@ -1,21 +1,45 @@
 import classNames from 'classnames';
 import React from 'react';
 import Utils from '../../common/utils/Utils';
-import { Link } from 'react-router-dom';
-import Routes from '../routes';
 import { getModelVersionPageRoute } from '../../model-registry/routes';
-import { CollapsibleTagsCell } from '../../common/components/CollapsibleTagsCell';
 import _ from 'lodash';
 import ExpandableList from '../../common/components/ExpandableList';
 import registryIcon from '../../common/static/registryIcon.svg';
 import { TrimmedText } from '../../common/components/TrimmedText';
-import { SEARCH_MAX_RESULTS } from '../actions';
 import {
   ATTRIBUTE_COLUMN_LABELS,
   ATTRIBUTE_COLUMN_SORT_KEY,
   DEFAULT_EXPANDED_VALUE,
   COLUMN_TYPES,
 } from '../constants';
+import {
+  CheckCircleBorderIcon,
+  ClockIcon,
+  XCircleBorderIcon,
+  useDesignSystemTheme,
+} from '@databricks/design-system';
+
+function ErrorIcon() {
+  const { theme } = useDesignSystemTheme();
+  return (
+    <XCircleBorderIcon
+      css={{
+        color: theme.colors.textValidationDanger,
+      }}
+    />
+  );
+}
+
+function FinishedIcon() {
+  const { theme } = useDesignSystemTheme();
+  return (
+    <CheckCircleBorderIcon
+      css={{
+        color: theme.colors.textValidationSuccess,
+      }}
+    />
+  );
+}
 
 export default class ExperimentViewUtil {
   /** Returns checkbox cell for a row. */
@@ -34,9 +58,6 @@ export default class ExperimentViewUtil {
     sortIconStyle: {
       verticalAlign: 'middle',
       fontSize: 20,
-    },
-    headerCellText: {
-      verticalAlign: 'middle',
     },
     sortIconContainer: {
       marginLeft: 2,
@@ -58,112 +79,127 @@ export default class ExperimentViewUtil {
     switch (status) {
       case 'FAILED':
       case 'KILLED':
-        return <i className='far fa-times-circle' style={{ color: '#DB1905' }} />;
+        return <ErrorIcon />;
       case 'FINISHED':
-        return <i className='far fa-check-circle' style={{ color: '#10B36B' }} />;
+        return <FinishedIcon />;
       case 'SCHEDULED':
-        return <i className='far fa-clock' style={{ color: '#258BD2' }} />;
+        return <ClockIcon />; // This one is the same color as the link
       default:
         return <i />;
     }
   }
 
   /**
-   * Returns table cells describing run metadata (i.e. not params/metrics) comprising part of
-   * the display row for a run.
+   * Format a string for insertion into a CSV file.
    */
-  static getRunInfoCellsForRow(runInfo, tags, isParent, cellType, handleCellToggle, excludedKeys) {
-    const CellComponent = `${cellType}`;
-    const user = Utils.getUser(runInfo, tags);
-    const queryParams = window.location && window.location.search ? window.location.search : '';
-    const sourceType = Utils.renderSource(tags, queryParams);
-    const { status, start_time: startTime, end_time: endTime } = runInfo;
-    const duration = Utils.getDuration(startTime, endTime);
-    const runName = Utils.getRunName(tags);
-    const childLeftMargin = isParent ? {} : { paddingLeft: 16 };
-    const columnProps = [
-      {
-        key: 'status',
-        className: 'run-table-container',
-        title: status,
-        children: ExperimentViewUtil.getRunStatusIcon(status),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.DATE,
-        className: 'run-table-container',
-        style: { whiteSpace: 'inherit' },
-        children: (
-          <div style={childLeftMargin}>
-            <Link to={Routes.getRunPageRoute(runInfo.experiment_id, runInfo.run_uuid)}>
-              {Utils.formatTimestamp(startTime)}
-            </Link>
-          </div>
-        ),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.DURATION,
-        className: 'run-table-container',
-        title: duration,
-        children: (
-          <div className='truncate-text single-line' style={ExperimentViewUtil.styles.runInfoCell}>
-            {duration}
-          </div>
-        ),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.USER,
-        className: 'run-table-container',
-        title: user,
-        children: (
-          <div className='truncate-text single-line' style={ExperimentViewUtil.styles.runInfoCell}>
-            {user}
-          </div>
-        ),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.RUN_NAME,
-        className: 'run-table-container',
-        title: runName,
-        children: (
-          <div className='truncate-text single-line' style={ExperimentViewUtil.styles.runInfoCell}>
-            {runName}
-          </div>
-        ),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.SOURCE,
-        className: 'run-table-container',
-        title: sourceType,
-        children: (
-          <div className='truncate-text single-line' style={ExperimentViewUtil.styles.runInfoCell}>
-            {Utils.renderSourceTypeIcon(tags)}
-            {sourceType}
-          </div>
-        ),
-      },
-      {
-        key: ATTRIBUTE_COLUMN_LABELS.VERSION,
-        className: 'run-table-container',
-        children: (
-          <div className='truncate-text single-line' style={ExperimentViewUtil.styles.runInfoCell}>
-            {Utils.renderVersion(tags)}
-          </div>
-        ),
-      },
-      {
-        key: 'Tags',
-        className: 'run-table-container',
-        children: (
-          <div style={ExperimentViewUtil.styles.runInfoCell}>
-            <CollapsibleTagsCell tags={tags} onToggle={handleCellToggle} />
-          </div>
-        ),
-      },
+  static csvEscape(str) {
+    if (str === undefined) {
+      return '';
+    }
+    if (/[,"\r\n]/.test(str)) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  /**
+   * Convert a table to a CSV string.
+   *
+   * @param columns Names of columns
+   * @param data Array of rows, each of which are an array of field values
+   */
+  static tableToCsv(columns, data) {
+    let csv = '';
+    let i;
+
+    for (i = 0; i < columns.length; i++) {
+      csv += ExperimentViewUtil.csvEscape(columns[i]);
+      if (i < columns.length - 1) {
+        csv += ',';
+      }
+    }
+    csv += '\n';
+
+    for (i = 0; i < data.length; i++) {
+      for (let j = 0; j < data[i].length; j++) {
+        csv += ExperimentViewUtil.csvEscape(data[i][j]);
+        if (j < data[i].length - 1) {
+          csv += ',';
+        }
+      }
+      csv += '\n';
+    }
+
+    return csv;
+  }
+
+  /**
+   * Convert an array of run infos to a CSV string, extracting the params and metrics in the
+   * provided lists.
+   */
+  static runInfosToCsv(
+    runInfos,
+    paramKeyList,
+    metricKeyList,
+    tagKeyList,
+    paramsList,
+    metricsList,
+    tagsList,
+  ) {
+    const columns = [
+      'Start Time',
+      'Duration',
+      'Run ID',
+      'Name',
+      'Source Type',
+      'Source Name',
+      'User',
+      'Status',
+      ...paramKeyList,
+      ...metricKeyList,
+      ...tagKeyList,
     ];
-    const excludedKeysSet = new Set(excludedKeys);
-    return columnProps
-      .filter((column) => !excludedKeysSet.has(column.key))
-      .map((props) => <CellComponent {...props} />);
+
+    const data = runInfos.map((runInfo, index) => {
+      const row = [
+        Utils.formatTimestamp(runInfo.start_time),
+        Utils.getDuration(runInfo.start_time, runInfo.end_time) || '',
+        runInfo.run_uuid,
+        Utils.getRunNameFromTags(tagsList[index]), // add run name to csv export row
+        Utils.getSourceType(tagsList[index]),
+        Utils.getSourceName(tagsList[index]),
+        Utils.getUser(runInfo, tagsList[index]),
+        runInfo.status,
+      ];
+      const paramsMap = ExperimentViewUtil.toParamsMap(paramsList[index]);
+      const metricsMap = ExperimentViewUtil.toMetricsMap(metricsList[index]);
+      const tagsMap = tagsList[index];
+
+      paramKeyList.forEach((paramKey) => {
+        if (paramsMap[paramKey]) {
+          row.push(paramsMap[paramKey].getValue());
+        } else {
+          row.push('');
+        }
+      });
+      metricKeyList.forEach((metricKey) => {
+        if (metricsMap[metricKey]) {
+          row.push(metricsMap[metricKey].getValue());
+        } else {
+          row.push('');
+        }
+      });
+      tagKeyList.forEach((tagKey) => {
+        if (tagsMap[tagKey]) {
+          row.push(tagsMap[tagKey].getValue());
+        } else {
+          row.push('');
+        }
+      });
+      return row;
+    });
+
+    return ExperimentViewUtil.tableToCsv(columns, data);
   }
 
   /**
@@ -207,7 +243,7 @@ export default class ExperimentViewUtil {
         canonicalSortKey,
       );
       const isSortable = canonicalSortKey !== null;
-      const cellClassName = classNames('bottom-row', 'run-table-container', {
+      const cellClassName = classNames('run-table-container', {
         sortable: isSortable,
       });
       return (
@@ -216,7 +252,7 @@ export default class ExperimentViewUtil {
           className={cellClassName}
           onClick={() => (isSortable ? onSortBy(canonicalSortKey, !curOrderByAsc) : null)}
         >
-          <span style={ExperimentViewUtil.styles.headerCellText}>{text}</span>
+          <span>{text}</span>
           {isSortable && (
             <span style={ExperimentViewUtil.styles.sortIconContainer}>{sortIcon}</span>
           )}
@@ -233,6 +269,11 @@ export default class ExperimentViewUtil {
         key: 'start_time',
         displayName: ATTRIBUTE_COLUMN_LABELS.DATE,
         canonicalSortKey: ATTRIBUTE_COLUMN_SORT_KEY.DATE,
+      },
+      {
+        key: 'duration',
+        displayName: ATTRIBUTE_COLUMN_LABELS.DURATION,
+        canonicalSortKey: null,
       },
       {
         key: 'user_id',
@@ -341,6 +382,8 @@ export default class ExperimentViewUtil {
       <div className='version-link'>
         <img src={registryIcon} alt='MLflow Model Registry Icon' />
         <span className='model-link-text'>
+          {/* Reported during ESLint upgrade */}
+          {/* eslint-disable-next-line react/jsx-no-target-blank */}
           <a
             href={Utils.getIframeCorrectedRoute(getModelVersionPageRoute(name, version))}
             className='model-version-link'
@@ -357,7 +400,7 @@ export default class ExperimentViewUtil {
   }
 
   static getLinkedModelCell(associatedModelVersions, handleCellToggle) {
-    const className = 'left-border run-table-container';
+    const className = 'run-table-container';
     if (associatedModelVersions && associatedModelVersions.length > 0) {
       return (
         <div className={className} key='linked=models'>
@@ -431,13 +474,13 @@ export default class ExperimentViewUtil {
     if (expanderOpen) {
       return (
         <CellComponent onClick={onExpandBound} key={'Expander-' + runUuid} style={{ padding: 8 }}>
-          <i className='ExperimentView-expander far fa-minus-square' />
+          <i className='ExperimentView-expander far fa-minus-square-o' />
         </CellComponent>
       );
     } else {
       return (
         <CellComponent onClick={onExpandBound} key={'Expander-' + runUuid} style={{ padding: 8 }}>
-          <i className='ExperimentView-expander far fa-plus-square' />
+          <i className='ExperimentView-expander far fa-plus-square-o' />
         </CellComponent>
       );
     }
@@ -460,10 +503,11 @@ export default class ExperimentViewUtil {
     });
     // Map of parentRunIds to list of children runs (idx)
     const parentIdToChildren = {};
+    const rootsIdxs = [];
     treeNodes.forEach((t, idx) => {
-      const root = t.findRoot();
-      if (root !== undefined && root.value !== t.value) {
-        const old = parentIdToChildren[root.value];
+      const { parent } = t;
+      if (parent !== undefined && parent.value !== t.value) {
+        const old = parentIdToChildren[parent.value];
         let newList;
         if (old) {
           old.push(idx);
@@ -471,43 +515,47 @@ export default class ExperimentViewUtil {
         } else {
           newList = [idx];
         }
-        parentIdToChildren[root.value] = newList;
+        parentIdToChildren[parent.value] = newList;
+      } else {
+        rootsIdxs.push(idx);
       }
     });
 
-    const parentRows = _.flatMap([...Array(runInfos.length).keys()], (idx) => {
-      if (treeNodes[idx].isCycle() || !treeNodes[idx].isRoot()) return [];
-      const runId = runInfos[idx].run_uuid;
-      let hasExpander = false;
-      let childrenIds = undefined;
-      if (parentIdToChildren[runId]) {
-        hasExpander = true;
-        childrenIds = parentIdToChildren[runId].map((cIdx) => runInfos[cIdx].run_uuid);
-      }
-      return [
-        {
-          idx,
-          isParent: true,
-          hasExpander,
-          expanderOpen: ExperimentViewUtil.isExpanderOpen(runsExpanded, runId),
-          childrenIds,
-          runId,
-        },
-      ];
-    });
     const mergedRows = [];
-    parentRows.forEach((r) => {
-      const { runId } = r;
-      mergedRows.push(r);
-      const childrenIdxs = parentIdToChildren[runId];
-      if (childrenIdxs) {
-        if (ExperimentViewUtil.isExpanderOpen(runsExpanded, runId)) {
-          const childrenRows = childrenIdxs.map((idx) => {
-            return { idx, isParent: false, hasExpander: false };
-          });
-          mergedRows.push(...childrenRows);
+    const visited = new Set();
+    rootsIdxs.forEach((index) => {
+      function dfs(idx, curr_level) {
+        if (!visited.has(idx)) {
+          const runId = runInfos[idx].run_uuid;
+          let row = undefined;
+          if (parentIdToChildren[runId]) {
+            row = {
+              idx,
+              isParent: true,
+              hasExpander: true,
+              expanderOpen: ExperimentViewUtil.isExpanderOpen(runsExpanded, runId),
+              childrenIds: parentIdToChildren[runId].map((cIdx) => runInfos[cIdx].run_uuid),
+              runId,
+              level: curr_level,
+            };
+          } else {
+            row = { idx, isParent: false, hasExpander: false, level: curr_level };
+          }
+
+          mergedRows.push(row);
+          visited.add(idx);
+
+          const childrenIdxs = parentIdToChildren[row.runId];
+          if (childrenIdxs) {
+            if (ExperimentViewUtil.isExpanderOpen(runsExpanded, row.runId)) {
+              childrenIdxs.forEach((dIdx) => {
+                dfs(dIdx, curr_level + 1);
+              });
+            }
+          }
         }
       }
+      dfs(index, 0);
     });
     return mergedRows.slice(0);
   }
@@ -545,12 +593,12 @@ export default class ExperimentViewUtil {
     });
   }
 
-  static disableLoadMoreButton({ numRunsFromLatestSearch }) {
+  static disableLoadMoreButton({ numRunsFromLatestSearch, nextPageToken }) {
     if (numRunsFromLatestSearch === null) {
       // numRunsFromLatestSearch is null by default, so we should not disable the button
       return false;
     }
-    return numRunsFromLatestSearch < SEARCH_MAX_RESULTS;
+    return nextPageToken === null;
   }
 
   /**

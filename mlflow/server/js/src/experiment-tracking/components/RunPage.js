@@ -11,6 +11,7 @@ import { ErrorCodes } from '../../common/constants';
 import { RunNotFoundView } from './RunNotFoundView';
 import { getUUID } from '../../common/utils/ActionUtils';
 import { Spinner } from '../../common/components/Spinner';
+import { PageContainer } from '../../common/components/PageContainer';
 
 export class RunPageImpl extends Component {
   static propTypes = {
@@ -59,7 +60,7 @@ export class RunPageImpl extends Component {
       <RunView
         runUuid={this.props.runUuid}
         getMetricPagePath={(key) =>
-          Routes.getMetricPageRoute([this.props.runUuid], key, this.props.experimentId)
+          Routes.getMetricPageRoute([this.props.runUuid], key, [this.props.experimentId])
         }
         experimentId={this.props.experimentId}
         modelVersions={this.props.modelVersions}
@@ -71,9 +72,14 @@ export class RunPageImpl extends Component {
   render() {
     const requestIds = [this.getRunRequestId, this.getExperimentRequestId];
     return (
-      <div className='App-content'>
-        <RequestStateWrapper requestIds={requestIds}>{this.renderRunView}</RequestStateWrapper>
-      </div>
+      <PageContainer>
+        <RequestStateWrapper
+          requestIds={requestIds}
+          // eslint-disable-next-line no-trailing-spaces
+        >
+          {this.renderRunView}
+        </RequestStateWrapper>
+      </PageContainer>
     );
   }
 }

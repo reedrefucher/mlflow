@@ -1,6 +1,6 @@
 import React from 'react';
 import _ from 'lodash';
-import { Modal, Button } from 'antd';
+import { Modal, Button } from '@databricks/design-system';
 import { FormattedMessage, injectIntl } from 'react-intl';
 
 import {
@@ -12,7 +12,6 @@ import {
 import {
   createRegisteredModelApi,
   createModelVersionApi,
-  listRegisteredModelsApi,
   searchModelVersionsApi,
   searchRegisteredModelsApi,
 } from '../actions';
@@ -34,7 +33,6 @@ export class RegisterModelButtonImpl extends React.Component {
     modelByName: PropTypes.object.isRequired,
     createRegisteredModelApi: PropTypes.func.isRequired,
     createModelVersionApi: PropTypes.func.isRequired,
-    listRegisteredModelsApi: PropTypes.func.isRequired,
     searchModelVersionsApi: PropTypes.func.isRequired,
     searchRegisteredModelsApi: PropTypes.func.isRequired,
     intl: PropTypes.shape({ formatMessage: PropTypes.func.isRequired }).isRequired,
@@ -52,6 +50,11 @@ export class RegisterModelButtonImpl extends React.Component {
 
   searchModelVersionRequestId = getUUID();
 
+  constructor() {
+    super();
+    this.form = React.createRef();
+  }
+
   showRegisterModal = () => {
     this.setState({ visible: true });
   };
@@ -62,8 +65,7 @@ export class RegisterModelButtonImpl extends React.Component {
 
   resetAndClearModalForm = () => {
     this.setState({ visible: false, confirmLoading: false });
-    this.form.resetFields();
-    this.formComponent.handleModelSelectChange();
+    this.form.current.resetFields();
   };
 
   handleRegistrationFailure = (e) => {
@@ -81,62 +83,52 @@ export class RegisterModelButtonImpl extends React.Component {
   };
 
   handleRegisterModel = () => {
-    this.form.validateFields((err, values) => {
-      if (!err) {
-        this.setState({ confirmLoading: true });
-        const { runUuid, modelPath } = this.props;
-        const selectedModelName = values[SELECTED_MODEL_FIELD];
-        if (selectedModelName === CREATE_NEW_MODEL_OPTION_VALUE) {
-          // When user choose to create a new registered model during the registration, we need to
-          // 1. Create a new registered model
-          // 2. Create model version #1 in the new registered model
-          this.props
-            .createRegisteredModelApi(values[MODEL_NAME_FIELD], this.createRegisteredModelRequestId)
-            .then(() =>
-              this.props.createModelVersionApi(
-                values[MODEL_NAME_FIELD],
-                modelPath,
-                runUuid,
-                this.createModelVersionRequestId,
-              ),
-            )
-            .then(this.resetAndClearModalForm)
-            .catch(this.handleRegistrationFailure)
-            .then(this.reloadModelVersionsForCurrentRun)
-            .catch(Utils.logErrorAndNotifyUser);
-        } else {
-          this.props
-            .createModelVersionApi(
-              selectedModelName,
+    this.form.current.validateFields().then((values) => {
+      this.setState({ confirmLoading: true });
+      const { runUuid, modelPath } = this.props;
+      const selectedModelName = values[SELECTED_MODEL_FIELD];
+      if (selectedModelName === CREATE_NEW_MODEL_OPTION_VALUE) {
+        // When user choose to create a new registered model during the registration, we need to
+        // 1. Create a new registered model
+        // 2. Create model version #1 in the new registered model
+        this.props
+          .createRegisteredModelApi(values[MODEL_NAME_FIELD], this.createRegisteredModelRequestId)
+          .then(() =>
+            this.props.createModelVersionApi(
+              values[MODEL_NAME_FIELD],
               modelPath,
               runUuid,
               this.createModelVersionRequestId,
-            )
-            .then(this.resetAndClearModalForm)
-            .catch(this.handleRegistrationFailure)
-            .then(this.reloadModelVersionsForCurrentRun)
-            .catch(Utils.logErrorAndNotifyUser);
-        }
+            ),
+          )
+          .then(this.resetAndClearModalForm)
+          .catch(this.handleRegistrationFailure)
+          .then(this.reloadModelVersionsForCurrentRun)
+          .catch(Utils.logErrorAndNotifyUser);
+      } else {
+        this.props
+          .createModelVersionApi(
+            selectedModelName,
+            modelPath,
+            runUuid,
+            this.createModelVersionRequestId,
+          )
+          .then(this.resetAndClearModalForm)
+          .catch(this.handleRegistrationFailure)
+          .then(this.reloadModelVersionsForCurrentRun)
+          .catch(Utils.logErrorAndNotifyUser);
       }
     });
   };
 
-  saveFormRef = (form) => {
-    this.form = form;
-  };
-
-  saveFormComponentRef = (formComponent) => {
-    this.formComponent = formComponent;
-  };
-
   componentDidMount() {
-    this.props.listRegisteredModelsApi();
+    this.props.searchRegisteredModelsApi();
   }
 
   componentDidUpdate(prevProps, prevState) {
     // Repopulate registered model list every time user launch the modal
     if (prevState.visible === false && this.state.visible === true) {
-      this.props.listRegisteredModelsApi();
+      this.props.searchRegisteredModelsApi();
     }
   }
 
@@ -194,8 +186,7 @@ export class RegisterModelButtonImpl extends React.Component {
         >
           <RegisterModelForm
             modelByName={modelByName}
-            ref={this.saveFormRef}
-            wrappedComponentRef={this.saveFormComponentRef}
+            innerRef={this.form}
             onSearchRegisteredModels={_.debounce(this.handleSearchRegisteredModels, 300)}
           />
         </Modal>
@@ -211,7 +202,6 @@ const mapStateToProps = (state) => ({
 const mapDispatchToProps = {
   createRegisteredModelApi,
   createModelVersionApi,
-  listRegisteredModelsApi,
   searchModelVersionsApi,
   searchRegisteredModelsApi,
 };

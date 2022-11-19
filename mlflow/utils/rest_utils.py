@@ -1,22 +1,30 @@
 import base64
 import json
+
 import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError
 import urllib3
 from contextlib import contextmanager
+from functools import lru_cache
 from packaging.version import Version
-from requests.adapters import HTTPAdapter
+
 from urllib3.util import Retry
 
-from mlflow import __version__
 from mlflow.protos import databricks_pb2
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, ENDPOINT_NOT_FOUND, ErrorCode
 from mlflow.utils.proto_json_utils import parse_dict
 from mlflow.utils.string_utils import strip_suffix
-from mlflow.exceptions import MlflowException, RestException
+from mlflow.exceptions import get_error_code, MlflowException, RestException
+
+from mlflow.environment_variables import (
+    MLFLOW_HTTP_REQUEST_TIMEOUT,
+    MLFLOW_HTTP_REQUEST_MAX_RETRIES,
+    MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR,
+)
 
 RESOURCE_DOES_NOT_EXIST = "RESOURCE_DOES_NOT_EXIST"
 _REST_API_PATH_PREFIX = "/api/2.0"
-_DEFAULT_HEADERS = {"User-Agent": "mlflow-python-client/%s" % __version__}
 # Response codes that generally indicate transient network failures and merit client retries,
 # based on guidance from cloud service providers
 # (https://docs.microsoft.com/en-us/azure/architecture/best-practices/retry-service-specific#general-rest-and-retry-guidelines)
@@ -32,22 +40,17 @@ _TRANSIENT_FAILURE_RESPONSE_CODES = frozenset(
 )
 
 
-def _get_http_response_with_retries(
-    method, url, max_retries, backoff_factor, retry_codes, **kwargs
-):
+@lru_cache(maxsize=64)
+def _get_request_session(max_retries, backoff_factor, retry_codes):
     """
-    Performs an HTTP request using Python's `requests` module with an automatic retry policy.
+    Returns a cached Requests.Session object for making HTTP request.
 
-    :param method: a string indicating the method to use, e.g. "GET", "POST", "PUT".
-    :param url: the target URL address for the HTTP request.
     :param max_retries: Maximum total number of retries.
     :param backoff_factor: a time factor for exponential backoff. e.g. value 5 means the HTTP
       request will be retried with interval 5, 10, 20... seconds. A value of 0 turns off the
       exponential backoff.
     :param retry_codes: a list of HTTP response error codes that qualifies for retry.
-    :param kwargs: Additional keyword arguments to pass to `requests.Session.request()`
-
-    :return: requests.Response object.
+    :return: requests.Session object.
     """
     assert 0 <= max_retries < 10
     assert 0 <= backoff_factor < 120
@@ -68,22 +71,42 @@ def _get_http_response_with_retries(
 
     retry = Retry(**retry_kwargs)
     adapter = HTTPAdapter(max_retries=retry)
-    with requests.Session() as http:
-        http.mount("https://", adapter)
-        http.mount("http://", adapter)
-        response = http.request(method, url, **kwargs)
-        return response
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _get_http_response_with_retries(
+    method, url, max_retries, backoff_factor, retry_codes, **kwargs
+):
+    """
+    Performs an HTTP request using Python's `requests` module with an automatic retry policy.
+
+    :param method: a string indicating the method to use, e.g. "GET", "POST", "PUT".
+    :param url: the target URL address for the HTTP request.
+    :param max_retries: Maximum total number of retries.
+    :param backoff_factor: a time factor for exponential backoff. e.g. value 5 means the HTTP
+      request will be retried with interval 5, 10, 20... seconds. A value of 0 turns off the
+      exponential backoff.
+    :param retry_codes: a list of HTTP response error codes that qualifies for retry.
+    :param kwargs: Additional keyword arguments to pass to `requests.Session.request()`
+
+    :return: requests.Response object.
+    """
+    session = _get_request_session(max_retries, backoff_factor, retry_codes)
+    return session.request(method, url, **kwargs)
 
 
 def http_request(
     host_creds,
     endpoint,
     method,
-    max_retries=5,
-    backoff_factor=2,
+    max_retries=None,
+    backoff_factor=None,
     retry_codes=_TRANSIENT_FAILURE_RESPONSE_CODES,
-    timeout=120,
-    **kwargs
+    timeout=None,
+    **kwargs,
 ):
     """
     Makes an HTTP request with the specified method to the specified hostname/endpoint. Transient
@@ -106,6 +129,9 @@ def http_request(
 
     :return: requests.Response object.
     """
+    max_retries = max_retries or MLFLOW_HTTP_REQUEST_MAX_RETRIES.get()
+    backoff_factor = backoff_factor or MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR.get()
+    timeout = timeout or MLFLOW_HTTP_REQUEST_TIMEOUT.get()
     hostname = host_creds.host
     auth_str = None
     if host_creds.username and host_creds.password:
@@ -116,7 +142,8 @@ def http_request(
 
     from mlflow.tracking.request_header.registry import resolve_request_headers
 
-    headers = dict({**_DEFAULT_HEADERS, **resolve_request_headers()})
+    headers = dict(**resolve_request_headers())
+
     if auth_str:
         headers["Authorization"] = auth_str
 
@@ -127,6 +154,12 @@ def http_request(
 
     if host_creds.client_cert_path is not None:
         kwargs["cert"] = host_creds.client_cert_path
+
+    if host_creds.aws_sigv4:
+        # will overwrite the Authorization header
+        from requests_auth_aws_sigv4 import AWSSigV4
+
+        kwargs["auth"] = AWSSigV4("execute-api")
 
     cleaned_hostname = strip_suffix(hostname, "/")
     url = "%s%s" % (cleaned_hostname, endpoint)
@@ -140,16 +173,21 @@ def http_request(
             headers=headers,
             verify=verify,
             timeout=timeout,
-            **kwargs
+            **kwargs,
+        )
+    except requests.exceptions.Timeout as to:
+        raise MlflowException(
+            f"API request to {url} failed with timeout exception {to}."
+            f" To increase the timeout, set the environment variable {MLFLOW_HTTP_REQUEST_TIMEOUT}"
+            " to a larger value."
         )
     except Exception as e:
         raise MlflowException("API request to %s failed with exception %s" % (url, e))
 
 
-def _can_parse_as_json(string):
+def _can_parse_as_json_object(string):
     try:
-        json.loads(string)
-        return True
+        return isinstance(json.loads(string), dict)
     except Exception:
         return False
 
@@ -165,18 +203,21 @@ def http_request_safe(host_creds, endpoint, method, **kwargs):
 def verify_rest_response(response, endpoint):
     """Verify the return code and format, raise exception if the request was not successful."""
     if response.status_code != 200:
-        if _can_parse_as_json(response.text):
+        if _can_parse_as_json_object(response.text):
             raise RestException(json.loads(response.text))
         else:
-            base_msg = "API request to endpoint %s failed with error code " "%s != 200" % (
+            base_msg = "API request to endpoint %s failed with error code %s != 200" % (
                 endpoint,
                 response.status_code,
             )
-            raise MlflowException("%s. Response body: '%s'" % (base_msg, response.text))
+            raise MlflowException(
+                "%s. Response body: '%s'" % (base_msg, response.text),
+                error_code=get_error_code(response.status_code),
+            )
 
     # Skip validation for endpoints (e.g. DBFS file-download API) which may return a non-JSON
     # response
-    if endpoint.startswith(_REST_API_PATH_PREFIX) and not _can_parse_as_json(response.text):
+    if endpoint.startswith(_REST_API_PATH_PREFIX) and not _can_parse_as_json_object(response.text):
         base_msg = (
             "API request to endpoint was successful but the response body was not "
             "in a valid JSON format"
@@ -186,12 +227,23 @@ def verify_rest_response(response, endpoint):
     return response
 
 
+def augmented_raise_for_status(response):
+    """Wrap the standard `requests.response.raise_for_status()` method and return reason"""
+    try:
+        response.raise_for_status()
+    except HTTPError as e:
+        if response.text:
+            raise HTTPError(f"{e}. Response text: {response.text}")
+        else:
+            raise e
+
+
 def _get_path(path_prefix, endpoint_path):
     return "{}{}".format(path_prefix, endpoint_path)
 
 
 def extract_api_info_for_service(service, path_prefix):
-    """ Return a dictionary mapping each API method to a tuple (path, HTTP method)"""
+    """Return a dictionary mapping each API method to a tuple (path, HTTP method)"""
     service_methods = service.DESCRIPTOR.methods
     res = {}
     for service_method in service_methods:
@@ -199,6 +251,18 @@ def extract_api_info_for_service(service, path_prefix):
         endpoint = endpoints[0]
         endpoint_path = _get_path(path_prefix, endpoint.path)
         res[service().GetRequestClass(service_method)] = (endpoint_path, endpoint.method)
+    return res
+
+
+def extract_all_api_info_for_service(service, path_prefix):
+    """Return a dictionary mapping each API method to a list of tuples [(path, HTTP method)]"""
+    service_methods = service.DESCRIPTOR.methods
+    res = {}
+    for service_method in service_methods:
+        endpoints = service_method.GetOptions().Extensions[databricks_pb2.rpc].endpoints
+        res[service().GetRequestClass(service_method)] = [
+            (_get_path(path_prefix, endpoint.path), endpoint.method) for endpoint in endpoints
+        ]
     return res
 
 
@@ -220,6 +284,17 @@ def call_endpoint(host_creds, endpoint, method, json_body, response_proto):
     return response_proto
 
 
+def call_endpoints(host_creds, endpoints, json_body, response_proto):
+    # The order that the endpoints are called in is defined by the order
+    # specified in ModelRegistryService in model_registry.proto
+    for i, (endpoint, method) in enumerate(endpoints):
+        try:
+            return call_endpoint(host_creds, endpoint, method, json_body, response_proto)
+        except RestException as e:
+            if e.error_code != ErrorCode.Name(ENDPOINT_NOT_FOUND) or i == len(endpoints) - 1:
+                raise e
+
+
 @contextmanager
 def cloud_storage_http_request(
     method,
@@ -228,12 +303,12 @@ def cloud_storage_http_request(
     backoff_factor=2,
     retry_codes=_TRANSIENT_FAILURE_RESPONSE_CODES,
     timeout=None,
-    **kwargs
+    **kwargs,
 ):
     """
-    Performs an HTTP PUT/GET request using Python's `requests` module with automatic retry.
+    Performs an HTTP PUT/GET/PATCH request using Python's `requests` module with automatic retry.
 
-    :param method: string of 'PUT' or 'GET', specify to do http PUT or GET
+    :param method: string of 'PUT' or 'GET' or 'PATCH', specify to do http PUT or GET or PATCH
     :param url: the target URL address for the HTTP request.
     :param max_retries: maximum number of retries before throwing an exception.
     :param backoff_factor: a time factor for exponential backoff. e.g. value 5 means the HTTP
@@ -246,7 +321,7 @@ def cloud_storage_http_request(
 
     :return requests.Response object.
     """
-    if method.lower() not in ("put", "get"):
+    if method.lower() not in ("put", "get", "patch"):
         raise ValueError("Illegal http method: " + method)
     try:
         with _get_http_response_with_retries(
@@ -257,7 +332,7 @@ def cloud_storage_http_request(
         raise MlflowException("API request failed with exception %s" % e)
 
 
-class MlflowHostCreds(object):
+class MlflowHostCreds:
     """
     Provides a hostname and optional authentication for talking to an MLflow tracking server.
     :param host: Hostname (e.g., http://localhost:5000) to MLflow server. Required.
@@ -267,6 +342,9 @@ class MlflowHostCreds(object):
         If this is specified, username must also be specified.
     :param token: Token to use with Bearer authentication when talking to server.
         If provided, user/password authentication will be ignored.
+    :param aws_sigv4: If true, we will create a signature V4 to be added for any outgoing request.
+        Keys for signing the request can be passed via ENV variables,
+        or will be fetched via boto3 session.
     :param ignore_tls_verification: If true, we will not verify the server's hostname or TLS
         certificate. This is useful for certain testing situations, but should never be
         true in production.
@@ -286,6 +364,7 @@ class MlflowHostCreds(object):
         username=None,
         password=None,
         token=None,
+        aws_sigv4=False,
         ignore_tls_verification=False,
         client_cert_path=None,
         server_cert_path=None,
@@ -310,6 +389,12 @@ class MlflowHostCreds(object):
         self.username = username
         self.password = password
         self.token = token
+        self.aws_sigv4 = aws_sigv4
         self.ignore_tls_verification = ignore_tls_verification
         self.client_cert_path = client_cert_path
         self.server_cert_path = server_cert_path
+
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__dict__ == other.__dict__
+        return NotImplemented

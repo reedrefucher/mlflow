@@ -16,7 +16,7 @@ def newTrackingServiceClient():
 
 
 @pytest.mark.parametrize(
-    "artifact_uri, databricks_uri, uri_for_repo",
+    ("artifact_uri", "databricks_uri", "uri_for_repo"),
     [
         ("dbfs:/path", "databricks://profile", "dbfs://profile@databricks/path"),
         ("dbfs:/path", "databricks://scope:key", "dbfs://scope:key@databricks/path"),
@@ -59,7 +59,8 @@ def test_artifact_repo_is_cached_per_run_id():
     with mock.patch(
         "mlflow.tracking._tracking_service.client.TrackingServiceClient.get_run",
         return_value=Run(
-            RunInfo("uuid", "expr_id", "userid", "status", 0, 10, "active", artifact_uri=uri), None,
+            RunInfo("uuid", "expr_id", "userid", "status", 0, 10, "active", artifact_uri=uri),
+            None,
         ),
     ):
         artifact_repo = TrackingServiceClient("some_tracking_uri")._get_artifact_repo("some_run_id")

@@ -32,11 +32,11 @@
 }
 
 .metadata-header {
-  font-size: 14px;
+  font-size: 13px;
   color: #888;
 }
 .metadata-info {
-  font-size: 14px;
+  font-size: 13px;
   color: #333;
 }
 
@@ -68,11 +68,6 @@ i.expander {
 
 .RunView-info {
   padding-right: 10px;
-}
-
-textarea.run-command {
-  width: 100%;
-  font-family: Menlo, Consolas, monospace;
 }
 
 .header-container .mlflow-menu > li.mlflow-menu-item:hover {
@@ -130,4 +125,9 @@ textarea.run-command {
 .mlflow-form-button {
   padding-left: 16px;
   padding-right: 16px;
+}
+
+.RunView-editDescriptionHeader {
+  height: 32px;
+  line-height: 32px;
 }

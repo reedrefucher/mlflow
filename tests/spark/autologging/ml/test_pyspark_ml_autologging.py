@@ -1,21 +1,16 @@
 import importlib
 import json
 import math
-import numpy as np
-import pandas as pd
-import pytest
 from collections import namedtuple
 from packaging.version import Version
+import yaml
+import pathlib
+
+import pytest
 from unittest import mock
 
-import mlflow
-from mlflow.entities import RunStatus
-from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID, MLFLOW_AUTOLOGGING
-from mlflow.utils import _truncate_dict
-from mlflow.utils.validation import (
-    MAX_PARAM_VAL_LENGTH,
-    MAX_ENTITY_KEY_LENGTH,
-)
+import numpy as np
+import pandas as pd
 
 import pyspark
 from pyspark.ml import Pipeline
@@ -32,8 +27,15 @@ from pyspark.ml.classification import (
     MultilayerPerceptronClassifier,
     OneVsRest,
 )
-from pyspark.ml.feature import HashingTF, Tokenizer, VectorAssembler
+from pyspark.ml.feature import HashingTF, Tokenizer, VectorAssembler, StringIndexer, IndexToString
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, TrainValidationSplit
+from pyspark.sql import SparkSession
+
+import mlflow
+from mlflow import MlflowClient
+from mlflow.entities import RunStatus
+from mlflow.models import Model
+from mlflow.models.utils import _read_example
 from mlflow.pyspark.ml import (
     _should_log_model,
     _get_instance_param_map,
@@ -43,10 +45,16 @@ from mlflow.pyspark.ml import (
     _gen_estimator_metadata,
     _get_tuning_param_maps,
 )
-from pyspark.sql import SparkSession
+from mlflow.pyspark.ml._autolog import cast_spark_df_with_vector_to_array, get_feature_cols
+from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID, MLFLOW_AUTOLOGGING
+from mlflow.utils import _truncate_dict
+from mlflow.utils.validation import (
+    MAX_PARAM_VAL_LENGTH,
+    MAX_ENTITY_KEY_LENGTH,
+)
 
+from tests.helper_functions import AnyStringWith
 
-pytestmark = pytest.mark.large
 
 MODEL_DIR = "model"
 MLFLOW_PARENT_RUN_ID = "mlflow.parentRunId"
@@ -89,6 +97,19 @@ def dataset_text(spark_session):
 
 
 @pytest.fixture(scope="module")
+def dataset_numeric(spark_session):
+    return spark_session.createDataFrame(
+        [
+            (1.0, 0),
+            (0.0, 1),
+            (1.0, 2),
+            (0.0, 3),
+        ],
+        ["number", "label"],
+    ).cache()
+
+
+@pytest.fixture(scope="module")
 def dataset_regression(spark_session):
     np.random.seed(1)
     num_features = 10
@@ -101,7 +122,7 @@ def dataset_regression(spark_session):
         label = float(np.dot(coef, features)) + err
         rows.append((label, Vectors.dense(*features)))
 
-    return spark_session.createDataFrame(rows, ["label", "features"],).cache()
+    return spark_session.createDataFrame(rows, ["label", "features"]).cache()
 
 
 @pytest.fixture(scope="module")
@@ -132,7 +153,7 @@ def get_expected_class_tags(estimator):
 
 
 def get_run_data(run_id):
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     data = client.get_run(run_id).data
     # Ignore tags mlflow logs by default (e.g. "mlflow.user")
     tags = {k: v for k, v in data.tags.items() if not k.startswith("mlflow.")}
@@ -186,7 +207,8 @@ def test_basic_estimator(dataset_binomial):
 
 
 @pytest.mark.skipif(
-    Version(pyspark.__version__) < Version("3.1"), reason="This test require spark version >= 3.1",
+    Version(pyspark.__version__) < Version("3.1"),
+    reason="This test require spark version >= 3.1",
 )
 def test_models_in_allowlist_exist(spark_session):  # pylint: disable=unused-argument
     mlflow.pyspark.ml.autolog()  # initialize the variable `mlflow.pyspark.ml._log_model_allowlist`
@@ -274,7 +296,29 @@ def test_fit_with_a_list_of_params(dataset_binomial):
             mock_set_tags.assert_not_called()
 
 
-def test_should_log_model(dataset_binomial, dataset_multinomial, dataset_text):
+@pytest.fixture
+def tokenizer():
+    return Tokenizer(inputCol="text", outputCol="words")
+
+
+@pytest.fixture
+def hashing_tf(tokenizer):
+    return HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
+
+
+@pytest.fixture
+def lr():
+    return LogisticRegression(maxIter=2)
+
+
+@pytest.fixture
+def lr_pipeline(tokenizer, hashing_tf, lr):
+    return Pipeline(stages=[tokenizer, hashing_tf, lr])
+
+
+def test_should_log_model(
+    dataset_binomial, dataset_multinomial, dataset_text, lr_pipeline, tokenizer, hashing_tf, lr
+):
     mlflow.pyspark.ml.autolog(log_models=True)
     lor = LogisticRegression()
 
@@ -287,15 +331,11 @@ def test_should_log_model(dataset_binomial, dataset_multinomial, dataset_text):
         ova1_model = ova1.fit(dataset_multinomial)
     assert _should_log_model(ova1_model)
 
-    tokenizer = Tokenizer(inputCol="text", outputCol="words")
-    hashingTF = HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
-    lr = LogisticRegression(maxIter=2)
-    pipeline = Pipeline(stages=[tokenizer, hashingTF, lr])
     with mlflow.start_run():
-        pipeline_model = pipeline.fit(dataset_text)
+        pipeline_model = lr_pipeline.fit(dataset_text)
     assert _should_log_model(pipeline_model)
 
-    nested_pipeline = Pipeline(stages=[tokenizer, Pipeline(stages=[hashingTF, lr])])
+    nested_pipeline = Pipeline(stages=[tokenizer, Pipeline(stages=[hashing_tf, lr])])
     with mlflow.start_run():
         nested_pipeline_model = nested_pipeline.fit(dataset_text)
     assert _should_log_model(nested_pipeline_model)
@@ -319,6 +359,90 @@ def test_should_log_model(dataset_binomial, dataset_multinomial, dataset_text):
         assert not _should_log_model(ova1_model)
         assert not _should_log_model(pipeline_model)
         assert not _should_log_model(nested_pipeline_model)
+
+
+def test_should_log_model_with_wildcards_in_allowlist(dataset_binomial, dataset_multinomial):
+    mlflow.pyspark.ml.autolog(log_models=True)
+    lor = LogisticRegression()
+    ova1 = OneVsRest(classifier=lor)
+    ova1_model = ova1.fit(dataset_multinomial)
+
+    with mock.patch(
+        "mlflow.pyspark.ml._log_model_allowlist",
+        {
+            "pyspark.ml.regression.*",
+            "pyspark.ml.classification.LogisticRegressionModel",
+            "pyspark.ml.feature.*",
+        },
+    ):
+        lr = LinearRegression()
+        with mlflow.start_run():
+            lr_model = lr.fit(dataset_binomial)
+        assert _should_log_model(lr_model)
+        with mlflow.start_run():
+            lor_model = lor.fit(dataset_binomial)
+        assert _should_log_model(lor_model)
+        assert not _should_log_model(ova1_model)
+
+
+def test_log_stage_type_params(spark_session):
+    from pyspark.ml.base import Estimator, Transformer, Model as SparkModel
+    from pyspark.ml.evaluation import Evaluator
+    from pyspark.ml.param import Param, Params
+    from pyspark.ml.feature import Binarizer, OneHotEncoder
+
+    class TestingEstimator(Estimator):
+
+        transformer = Param(Params._dummy(), "transformer", "a transformer param")
+        model = Param(Params._dummy(), "model", "a model param")
+        evaluator = Param(Params._dummy(), "evaluator", "an evaluator param")
+
+        def setTransformer(self, transformer: Transformer):
+            return self._set(transformer=transformer)
+
+        def setModel(self, model: SparkModel):
+            return self._set(model=model)
+
+        def setEvaluator(self, evaluator: Evaluator):
+            return self._set(evaluator=evaluator)
+
+        def _fit(self, dataset):
+            return TestingModel()
+
+    class TestingModel(SparkModel):
+        def _transform(self, dataset):
+            return dataset
+
+    binarizer = Binarizer(threshold=1.0, inputCol="values", outputCol="features")
+    df = spark_session.createDataFrame([(0.0,), (1.0,), (2.0,)], ["input"])
+    ohe = OneHotEncoder().setInputCols(["input"]).setOutputCols(["output"])
+    ohemodel = ohe.fit(df)
+    bcd = BinaryClassificationEvaluator(metricName="areaUnderROC")
+
+    estimator = TestingEstimator().setTransformer(binarizer).setModel(ohemodel).setEvaluator(bcd)
+    param_map = get_params_to_log(estimator)
+    assert param_map["transformer"] == "Binarizer"
+    assert param_map["model"] == "OneHotEncoderModel"
+    assert param_map["evaluator"] == "BinaryClassificationEvaluator"
+
+    mlflow.pyspark.ml.autolog()
+    with mlflow.start_run() as run:
+        estimator.fit(df)
+        metadata = _gen_estimator_metadata(estimator)
+        estimator_info = load_json_artifact("estimator_info.json")
+        assert metadata.hierarchy == estimator_info["hierarchy"]
+        assert isinstance(estimator_info["hierarchy"]["params"], dict)
+        assert estimator_info["hierarchy"]["params"]["transformer"]["name"] == "Binarizer"
+        assert estimator_info["hierarchy"]["params"]["model"]["name"] == "OneHotEncoderModel"
+        assert (
+            estimator_info["hierarchy"]["params"]["evaluator"]["name"]
+            == "BinaryClassificationEvaluator"
+        )
+    run_id = run.info.run_id
+    run_data = get_run_data(run_id)
+    assert run_data.params == truncate_param_dict(
+        stringify_dict_values(get_params_to_log(estimator))
+    )
 
 
 def test_param_map_captures_wrapped_params(dataset_binomial):
@@ -347,10 +471,10 @@ def test_pipeline(dataset_text):
     mlflow.pyspark.ml.autolog()
 
     tokenizer = Tokenizer(inputCol="text", outputCol="words")
-    hashingTF = HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
+    hashing_tf = HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
     lr = LogisticRegression(maxIter=2, regParam=0.001)
-    pipeline = Pipeline(stages=[tokenizer, hashingTF, lr])
-    inner_pipeline = Pipeline(stages=[hashingTF, lr])
+    pipeline = Pipeline(stages=[tokenizer, hashing_tf, lr])
+    inner_pipeline = Pipeline(stages=[hashing_tf, lr])
     nested_pipeline = Pipeline(stages=[tokenizer, inner_pipeline])
 
     for estimator in [pipeline, nested_pipeline]:
@@ -379,7 +503,7 @@ def test_pipeline(dataset_text):
 def test_param_search_estimator(  # pylint: disable=unused-argument
     metric_name, param_search_estimator, spark_session, dataset_regression
 ):
-    mlflow.pyspark.ml.autolog()
+    mlflow.pyspark.ml.autolog(log_input_examples=True)
     lr = LinearRegression(solver="l-bfgs", regParam=0.01)
     lrParamMaps = [
         {lr.maxIter: 1, lr.standardization: False},
@@ -395,13 +519,13 @@ def test_param_search_estimator(  # pylint: disable=unused-argument
         metadata = _gen_estimator_metadata(estimator)
         assert metadata.hierarchy == estimator_info["hierarchy"]
 
-        param_search_estiamtor_info = estimator_info[
+        param_search_estimator_info = estimator_info[
             metadata.uid_to_indexed_name_map[estimator.uid]
         ]
-        assert param_search_estiamtor_info[
+        assert param_search_estimator_info[
             "tuned_estimator_parameter_map"
         ] == _get_instance_param_map_recursively(lr, 1, metadata.uid_to_indexed_name_map)
-        assert param_search_estiamtor_info["tuning_parameter_map_list"] == _get_tuning_param_maps(
+        assert param_search_estimator_info["tuning_parameter_map_list"] == _get_tuning_param_maps(
             estimator, metadata.uid_to_indexed_name_map
         )
 
@@ -434,7 +558,7 @@ def test_param_search_estimator(  # pylint: disable=unused-argument
         "search_results.csv",
     ]
 
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     child_runs = client.search_runs(
         run.info.experiment_id, "tags.`mlflow.parentRunId` = '{}'".format(run_id)
     )
@@ -484,7 +608,7 @@ def test_param_search_estimator(  # pylint: disable=unused-argument
         assert math.isclose(avg_metric_value, run_data.metrics[avg_metric_name], rel_tol=1e-6)
         assert math.isclose(avg_metric_value, float(row.get(avg_metric_name)), rel_tol=1e-6)
 
-        if isinstance(estimator, CrossValidator) and Version(pyspark.__version__) > Version("3.2"):
+        if isinstance(estimator, CrossValidator) and Version(pyspark.__version__) >= Version("3.3"):
             std_metric_name = f"std_{metric_name}"
             std_metric_value = model.stdMetrics[row_index]
             assert math.isclose(std_metric_value, run_data.metrics[std_metric_name], rel_tol=1e-6)
@@ -510,9 +634,9 @@ def test_get_params_to_log(spark_session):  # pylint: disable=unused-argument
     )
 
     tokenizer = Tokenizer(inputCol="text", outputCol="words")
-    hashingTF = HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
-    pipeline = Pipeline(stages=[tokenizer, hashingTF, ova])
-    inner_pipeline = Pipeline(stages=[hashingTF, ova])
+    hashing_tf = HashingTF(inputCol=tokenizer.getOutputCol(), outputCol="features")
+    pipeline = Pipeline(stages=[tokenizer, hashing_tf, ova])
+    inner_pipeline = Pipeline(stages=[hashing_tf, ova])
     nested_pipeline = Pipeline(stages=[tokenizer, inner_pipeline])
 
     pipeline_params = get_params_to_log(pipeline)
@@ -535,25 +659,25 @@ def test_get_params_to_log(spark_session):  # pylint: disable=unused-argument
 
 def test_gen_estimator_metadata(spark_session):  # pylint: disable=unused-argument
     tokenizer1 = Tokenizer(inputCol="text1", outputCol="words1")
-    hashingTF1 = HashingTF(inputCol=tokenizer1.getOutputCol(), outputCol="features1")
+    hashing_tf1 = HashingTF(inputCol=tokenizer1.getOutputCol(), outputCol="features1")
 
     tokenizer2 = Tokenizer(inputCol="text2", outputCol="words2")
-    hashingTF2 = HashingTF(inputCol=tokenizer2.getOutputCol(), outputCol="features2")
+    hashing_tf2 = HashingTF(inputCol=tokenizer2.getOutputCol(), outputCol="features2")
 
-    vecAssembler = VectorAssembler(inputCols=["features1", "features2"], outputCol="features")
+    vec_assembler = VectorAssembler(inputCols=["features1", "features2"], outputCol="features")
 
     lor = LogisticRegression(maxIter=10)
     ova = OneVsRest(classifier=lor)
-    sub_pipeline1 = Pipeline(stages=[tokenizer1, hashingTF1])
-    sub_pipeline2 = Pipeline(stages=[tokenizer2, hashingTF2])
-    sub_pipeline3 = Pipeline(stages=[vecAssembler, ova])
+    sub_pipeline1 = Pipeline(stages=[tokenizer1, hashing_tf1])
+    sub_pipeline2 = Pipeline(stages=[tokenizer2, hashing_tf2])
+    sub_pipeline3 = Pipeline(stages=[vec_assembler, ova])
 
-    paramGrid = (
+    param_grid = (
         ParamGridBuilder().addGrid(lor.maxIter, [10, 20]).addGrid(lor.regParam, [0.1, 0.01]).build()
     )
     eva = MulticlassClassificationEvaluator()
     crossval = CrossValidator(
-        estimator=sub_pipeline3, estimatorParamMaps=paramGrid, evaluator=eva, numFolds=2
+        estimator=sub_pipeline3, estimatorParamMaps=param_grid, evaluator=eva, numFolds=2
     )
 
     top_pipeline = Pipeline(stages=[sub_pipeline1, sub_pipeline2, crossval])
@@ -583,13 +707,13 @@ def test_gen_estimator_metadata(spark_session):  # pylint: disable=unused-argume
         top_pipeline.uid: "Pipeline_1",
         sub_pipeline1.uid: "Pipeline_2",
         tokenizer1.uid: "Tokenizer_1",
-        hashingTF1.uid: "HashingTF_1",
+        hashing_tf1.uid: "HashingTF_1",
         sub_pipeline2.uid: "Pipeline_3",
         tokenizer2.uid: "Tokenizer_2",
-        hashingTF2.uid: "HashingTF_2",
+        hashing_tf2.uid: "HashingTF_2",
         crossval.uid: "CrossValidator",
         sub_pipeline3.uid: "Pipeline_4",
-        vecAssembler.uid: "VectorAssembler",
+        vec_assembler.uid: "VectorAssembler",
         ova.uid: "OneVsRest",
         lor.uid: "LogisticRegression",
         eva.uid: "MulticlassClassificationEvaluator",
@@ -620,7 +744,7 @@ def test_basic_post_training_metric_autologging(dataset_iris_binomial):
         eval_dataset = dataset_iris_binomial.sample(fraction=0.3, seed=1)
         bce = BinaryClassificationEvaluator(metricName="areaUnderROC")
         pred_result = model.transform(eval_dataset)
-        areaUnderROC = bce.evaluate(pred_result)
+        area_under_roc = bce.evaluate(pred_result)
 
         # test computing the same metric twice
         bce.evaluate(pred_result)
@@ -631,8 +755,8 @@ def test_basic_post_training_metric_autologging(dataset_iris_binomial):
 
     assert np.isclose(logloss, run_data.metrics["logLoss_eval_dataset"])
     assert np.isclose(accuracy, run_data.metrics["accuracy_eval_dataset"])
-    assert np.isclose(areaUnderROC, run_data.metrics["areaUnderROC_eval_dataset-2"])
-    assert np.isclose(areaUnderROC, run_data.metrics["areaUnderROC-2_eval_dataset-2"])
+    assert np.isclose(area_under_roc, run_data.metrics["areaUnderROC_eval_dataset-2"])
+    assert np.isclose(area_under_roc, run_data.metrics["areaUnderROC-2_eval_dataset-2"])
 
     assert metric_info == {
         "accuracy_eval_dataset": {
@@ -682,10 +806,10 @@ def test_basic_post_training_metric_autologging(dataset_iris_binomial):
     mlflow.pyspark.ml.autolog(disable=True)
     recall_original = mce.evaluate(pred_result)
     assert np.isclose(logloss, recall_original)
-    accruacy_original = mce.evaluate(pred_result, params={mce.metricName: "accuracy"})
-    assert np.isclose(accuracy, accruacy_original)
-    areaUnderROC_original = bce.evaluate(pred_result)
-    assert np.isclose(areaUnderROC, areaUnderROC_original)
+    accuracy_original = mce.evaluate(pred_result, params={mce.metricName: "accuracy"})
+    assert np.isclose(accuracy, accuracy_original)
+    area_under_roc_original = bce.evaluate(pred_result)
+    assert np.isclose(area_under_roc, area_under_roc_original)
 
 
 def test_multi_model_interleaved_fit_and_post_train_metric_call(dataset_iris_binomial):
@@ -720,13 +844,13 @@ def test_meta_estimator_disable_post_training_autologging(dataset_regression):
     mlflow.pyspark.ml.autolog()
     lr = LinearRegression(solver="l-bfgs", regParam=0.01)
     eval_dataset = dataset_regression.sample(fraction=0.3, seed=1)
-    lrParamMaps = [
+    lr_param_maps = [
         {lr.maxIter: 1, lr.standardization: False},
         {lr.maxIter: 200, lr.standardization: True},
         {lr.maxIter: 2, lr.standardization: False},
     ]
     eva = RegressionEvaluator(metricName="rmse")
-    estimator = TrainValidationSplit(estimator=lr, estimatorParamMaps=lrParamMaps, evaluator=eva)
+    estimator = TrainValidationSplit(estimator=lr, estimatorParamMaps=lr_param_maps, evaluator=eva)
 
     with mock.patch(
         "mlflow.pyspark.ml._AutologgingMetricsManager.register_model"
@@ -752,10 +876,8 @@ def test_is_metrics_value_loggable():
     is_metric_value_loggable = mlflow.pyspark.ml._AutologgingMetricsManager.is_metric_value_loggable
     assert is_metric_value_loggable(3)
     assert is_metric_value_loggable(3.5)
-    assert is_metric_value_loggable(np.int(3))
     assert is_metric_value_loggable(np.float32(3.5))
     assert not is_metric_value_loggable(True)
-    assert not is_metric_value_loggable(np.bool(True))
     assert not is_metric_value_loggable([1, 2])
     assert not is_metric_value_loggable(np.array([1, 2]))
 
@@ -803,3 +925,265 @@ def test_autologging_handle_wrong_tuning_params(dataset_regression):
         ValueError, match="Tuning params should not include params not owned by the tuned estimator"
     ):
         pipeline.fit(dataset_regression)
+
+
+# pylint: disable=unused-argument
+
+
+def test_autolog_registering_model(spark_session, dataset_binomial):
+    registered_model_name = "test_autolog_registered_model"
+    mlflow.pyspark.ml.autolog(registered_model_name=registered_model_name)
+    with mlflow.start_run():
+        lr = LinearRegression()
+        lr.fit(dataset_binomial)
+
+        registered_model = MlflowClient().get_registered_model(registered_model_name)
+        assert registered_model.name == registered_model_name
+
+
+def _read_model_conf_as_dict(run):
+    artifacts_dir = pathlib.Path(run.info.artifact_uri.replace("file://", ""))
+    client = MlflowClient()
+    artifacts = [x.path for x in client.list_artifacts(run.info.run_id, "model")]
+    ml_model_filename = "MLmodel"
+    ml_model_path = artifacts_dir.joinpath("model", ml_model_filename).absolute()
+    assert ml_model_path.relative_to(artifacts_dir.absolute()).as_posix() in artifacts
+    with open(ml_model_path, "r") as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+
+def _read_schema(schema_str):
+    if schema_str is None:
+        return None
+    return json.loads(schema_str)
+
+
+def _assert_autolog_infers_model_signature_correctly(run, input_sig_spec, output_sig_spec):
+    data = _read_model_conf_as_dict(run)
+    assert data is not None
+    assert "signature" in data
+    signature = data["signature"]
+    assert signature is not None
+    assert "inputs" in signature
+    assert "outputs" in signature
+    assert _read_schema(signature["inputs"]) == input_sig_spec
+    assert _read_schema(signature["outputs"]) == output_sig_spec
+
+
+def test_autolog_input_example_with_estimator(spark_session, dataset_multinomial, lr):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+
+    with mlflow.start_run() as run:
+        lr.fit(dataset_multinomial)
+        model_path = pathlib.Path(run.info.artifact_uri).joinpath("model")
+        model_conf = Model.load(model_path.joinpath("MLmodel"))
+        input_example = _read_example(model_conf, model_path.as_posix())
+        pyfunc_model = mlflow.pyfunc.load_model(model_path.as_posix())
+        pyfunc_model.predict(input_example)
+
+
+def test_autolog_signature_with_estimator(spark_session, dataset_multinomial, lr):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+
+    with mlflow.start_run() as run:
+        lr.fit(dataset_multinomial)
+        model_conf = _read_model_conf_as_dict(run)
+        assert "signature" not in model_conf
+
+
+def test_autolog_input_example_with_pipeline(lr_pipeline, dataset_text):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+    with mlflow.start_run() as run:
+        lr_pipeline.fit(dataset_text)
+        model_path = pathlib.Path(run.info.artifact_uri).joinpath("model")
+        model_conf = Model.load(model_path.joinpath("MLmodel"))
+        input_example = _read_example(model_conf, model_path.as_posix())
+        pyfunc_model = mlflow.pyfunc.load_model(model_path.as_posix())
+        pyfunc_model.predict(input_example)
+
+
+def test_autolog_signature_with_pipeline(lr_pipeline, dataset_text):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+    with mlflow.start_run() as run:
+        lr_pipeline.fit(dataset_text)
+        _assert_autolog_infers_model_signature_correctly(
+            run, input_sig_spec=[{"name": "text", "type": "string"}], output_sig_spec=None
+        )
+
+
+def test_autolog_signature_non_scaler_input(dataset_multinomial, lr):
+    mlflow.pyspark.ml.autolog(log_models=True, log_model_signatures=True)
+    with mlflow.start_run() as run, mock.patch("mlflow.pyspark.ml._logger.warning") as mock_warning:
+        lr.fit(dataset_multinomial)
+        mock_warning.assert_called_once_with(AnyStringWith("Model signature is not logged"))
+        model_path = pathlib.Path(run.info.artifact_uri).joinpath("model")
+        model_conf = Model.load(model_path.joinpath("MLmodel"))
+        assert model_conf.signature is None
+
+
+def test_autolog_signature_scalar_input_and_non_scalar_output(dataset_numeric):
+    mlflow.pyspark.ml.autolog(log_models=True, log_model_signatures=True)
+    input_cols = [c for c in dataset_numeric.columns if c != "label"]
+    pipe = Pipeline(
+        stages=[VectorAssembler(inputCols=input_cols, outputCol="features"), LinearRegression()]
+    )
+    with mlflow.start_run() as run, mock.patch("mlflow.pyspark.ml._logger.warning") as mock_warning:
+        pipe.fit(dataset_numeric)
+        mock_warning.assert_called_once_with(AnyStringWith("Output schema is not be logged"))
+        ml_model_path = pathlib.Path(run.info.artifact_uri).joinpath("model", "MLmodel")
+        with open(ml_model_path) as f:
+            data = yaml.safe_load(f)
+            signature = data["signature"]
+            assert json.loads(signature["inputs"]) == [{"name": "number", "type": "double"}]
+            assert signature["outputs"] is None
+
+
+@pytest.fixture
+def multinomial_df_with_string_labels(spark_session):
+    return spark_session.createDataFrame(
+        [(0, "a"), (1, "b"), (2, "c"), (3, "a"), (4, "a"), (5, "c")]
+    ).toDF("id", "category")
+
+
+@pytest.fixture
+def multinomial_lr_with_index_to_string_stage_pipeline(multinomial_df_with_string_labels):
+    string_indexer = StringIndexer(inputCol="category", outputCol="label").fit(
+        multinomial_df_with_string_labels
+    )
+    return Pipeline(
+        stages=[
+            string_indexer,
+            VectorAssembler(inputCols=["id"], outputCol="features"),
+            LogisticRegression(),
+            IndexToString(
+                inputCol="prediction", outputCol="originalLabel", labels=string_indexer.labels
+            ),
+        ]
+    )
+
+
+def test_input_example_with_index_to_string_stage(
+    multinomial_df_with_string_labels, multinomial_lr_with_index_to_string_stage_pipeline
+):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+    with mlflow.start_run() as run:
+        multinomial_lr_with_index_to_string_stage_pipeline.fit(multinomial_df_with_string_labels)
+        model_path = pathlib.Path(run.info.artifact_uri).joinpath("model")
+        model_conf = Model.load(model_path.joinpath("MLmodel"))
+        input_example = _read_example(model_conf, model_path.as_posix())
+        pyfunc_model = mlflow.pyfunc.load_model(model_path.as_posix())
+        pyfunc_model.predict(input_example)
+
+
+def test_signature_with_index_to_string_stage(
+    multinomial_df_with_string_labels, multinomial_lr_with_index_to_string_stage_pipeline
+):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+    with mlflow.start_run() as run:
+        multinomial_lr_with_index_to_string_stage_pipeline.fit(multinomial_df_with_string_labels)
+        _assert_autolog_infers_model_signature_correctly(
+            run, input_sig_spec=[{"name": "id", "type": "long"}], output_sig_spec=None
+        )
+
+
+@pytest.fixture
+def input_df_with_non_features(spark_session):
+    return spark_session.createDataFrame(
+        [
+            (0, "a", "a", "b"),
+            (1, "b", "a", "b"),
+            (2, "c", "a", "b"),
+            (3, "a", "a", "b"),
+            (4, "a", "a", "b"),
+            (5, "c", "a", "b"),
+        ]
+    ).toDF("id", "category", "not_a_feature_1", "not_a_feature_2")
+
+
+@pytest.fixture
+def pipeline_for_feature_cols(input_df_with_non_features):
+    string_indexer = StringIndexer(inputCol="category", outputCol="label").fit(
+        input_df_with_non_features
+    )
+    return Pipeline(
+        stages=[
+            string_indexer,
+            VectorAssembler(inputCols=["id"], outputCol="features"),
+            LogisticRegression(),
+            IndexToString(
+                inputCol="prediction", outputCol="originalLabel", labels=string_indexer.labels
+            ),
+        ]
+    )
+
+
+def test_signature_with_non_feature_input_columns(
+    input_df_with_non_features, pipeline_for_feature_cols
+):
+    mlflow.pyspark.ml.autolog(log_models=True, log_input_examples=True)
+    with mlflow.start_run() as run:
+        pipeline_for_feature_cols.fit(input_df_with_non_features)
+        _assert_autolog_infers_model_signature_correctly(
+            run,
+            input_sig_spec=[{"name": "id", "type": "long"}],
+            output_sig_spec=None,
+        )
+
+
+def test_spark_df_with_vector_to_array_casts_successfully(dataset_multinomial):
+    from pyspark.sql.types import ArrayType, DoubleType
+
+    output_df = cast_spark_df_with_vector_to_array(dataset_multinomial)
+    features_col = next(filter(lambda f: f.name == "features", output_df.schema.fields))
+    assert features_col.dataType == ArrayType(
+        DoubleType(), False
+    ), "'features' column isn't of expected type array<double>"
+
+
+def test_get_feature_cols(input_df_with_non_features, pipeline_for_feature_cols):
+    pipeline_model = pipeline_for_feature_cols.fit(input_df_with_non_features)
+    assert get_feature_cols(input_df_with_non_features, pipeline_model) == {
+        "id"
+    }, "Wrong feature columns returned"
+
+
+def test_get_feature_cols_with_indexer_and_assembler(spark_session):
+    df = spark_session.createDataFrame(
+        [
+            (0, "a", 0),
+            (1, "b", 0),
+            (0, "c", 0),
+            (1, "a", 0),
+            (0, "a", 0),
+            (1, "c", 0),
+        ]
+    ).toDF("label", "categorical", "unused")
+    indexer = StringIndexer(inputCol="categorical", outputCol="indexed")
+    assembler = VectorAssembler(inputCols=["indexed"], outputCol="features")
+    lr = LogisticRegression()
+    pipeline = Pipeline(stages=[indexer, assembler, lr])
+    pipeline_model = pipeline.fit(df)
+    assert get_feature_cols(df, pipeline_model) == {"categorical"}
+
+
+def test_find_and_set_features_col_as_vector_if_needed(lr, dataset_binomial):
+    from mlflow.spark import _find_and_set_features_col_as_vector_if_needed
+    from pyspark.ml.linalg import VectorUDT
+    from pyspark.sql.utils import IllegalArgumentException
+
+    pipeline_model = lr.fit(dataset_binomial)
+    df_with_array_features = cast_spark_df_with_vector_to_array(dataset_binomial)
+    df_with_vector_features = _find_and_set_features_col_as_vector_if_needed(
+        df_with_array_features, pipeline_model
+    )
+    features_col = next(
+        filter(lambda f: f.name == "features", df_with_vector_features.schema.fields)
+    )
+    assert isinstance(
+        features_col.dataType, VectorUDT
+    ), "'features' column wasn't cast to vector type"
+    pipeline_model.transform(df_with_vector_features)
+    with pytest.raises(
+        IllegalArgumentException, match="requirement failed: Column features must be of type"
+    ):
+        pipeline_model.transform(df_with_array_features)

@@ -7,7 +7,7 @@ import os
 import logging
 
 import mlflow.projects.databricks
-import mlflow.tracking as tracking
+from mlflow import tracking
 from mlflow.entities import RunStatus
 from mlflow.exceptions import ExecutionException, MlflowException
 from mlflow.projects.submitted_run import SubmittedRun
@@ -19,13 +19,20 @@ from mlflow.projects.utils import (
     get_or_create_run,
     load_project,
     MLFLOW_LOCAL_BACKEND_RUN_ID_CONFIG,
-    PROJECT_USE_CONDA,
+    PROJECT_ENV_MANAGER,
     PROJECT_STORAGE_DIR,
     PROJECT_DOCKER_ARGS,
+    PROJECT_BUILD_IMAGE,
 )
 from mlflow.projects.backend import loader
 from mlflow.tracking.fluent import _get_experiment_id
-from mlflow.utils.mlflow_tags import MLFLOW_PROJECT_ENV, MLFLOW_PROJECT_BACKEND
+from mlflow.utils.mlflow_tags import (
+    MLFLOW_PROJECT_ENV,
+    MLFLOW_PROJECT_BACKEND,
+    MLFLOW_RUN_NAME,
+    MLFLOW_DOCKER_IMAGE_ID,
+)
+from mlflow.utils import env_manager as _EnvManager
 import mlflow.utils.uri
 
 _logger = logging.getLogger(__name__)
@@ -57,7 +64,7 @@ def _resolve_experiment_id(experiment_name=None, experiment_id=None):
         if exp:
             return exp.experiment_id
         else:
-            print("INFO: '{}' does not exist. Creating a new experiment".format(experiment_name))
+            _logger.info("'%s' does not exist. Creating a new experiment", experiment_name)
             return client.create_experiment(experiment_name)
 
     return _get_experiment_id()
@@ -72,19 +79,22 @@ def _run(
     docker_args,
     backend_name,
     backend_config,
-    use_conda,
     storage_dir,
+    env_manager,
     synchronous,
+    run_name,
+    build_image,
 ):
     """
     Helper that delegates to the project-running method corresponding to the passed-in backend.
     Returns a ``SubmittedRun`` corresponding to the project run.
     """
     tracking_store_uri = tracking.get_tracking_uri()
-    backend_config[PROJECT_USE_CONDA] = use_conda
+    backend_config[PROJECT_ENV_MANAGER] = env_manager
     backend_config[PROJECT_SYNCHRONOUS] = synchronous
     backend_config[PROJECT_DOCKER_ARGS] = docker_args
     backend_config[PROJECT_STORAGE_DIR] = storage_dir
+    backend_config[PROJECT_BUILD_IMAGE] = build_image
     # TODO: remove this check once kubernetes execution has been refactored
     if backend_name not in {"databricks", "kubernetes"}:
         backend = loader.load_backend(backend_name)
@@ -101,6 +111,8 @@ def _run(
             tracking.MlflowClient().set_tag(
                 submitted_run.run_id, MLFLOW_PROJECT_BACKEND, backend_name
             )
+            if run_name is not None:
+                tracking.MlflowClient().set_tag(submitted_run.run_id, MLFLOW_RUN_NAME, run_name)
             return submitted_run
 
     work_dir = fetch_and_validate_project(uri, version, entry_point, parameters)
@@ -110,6 +122,9 @@ def _run(
     active_run = get_or_create_run(
         None, uri, experiment_id, work_dir, version, entry_point, parameters
     )
+
+    if run_name is not None:
+        tracking.MlflowClient().set_tag(active_run.info.run_id, MLFLOW_RUN_NAME, run_name)
 
     if backend_name == "databricks":
         tracking.MlflowClient().set_tag(
@@ -125,6 +140,7 @@ def _run(
             parameters=parameters,
             experiment_id=experiment_id,
             cluster_spec=backend_config,
+            env_manager=env_manager,
         )
 
     elif backend_name == "kubernetes":
@@ -147,8 +163,12 @@ def _run(
             repository_uri=kube_config["repository-uri"],
             base_image=project.docker_env.get("image"),
             run_id=active_run.info.run_id,
+            build_image=build_image,
         )
         image_digest = kb.push_image_to_registry(image.tags[0])
+        tracking.MlflowClient().set_tag(
+            active_run.info.run_id, MLFLOW_DOCKER_IMAGE_ID, image_digest
+        )
         submitted_run = kb.run_kubernetes_job(
             project.name,
             active_run,
@@ -180,10 +200,12 @@ def run(
     experiment_id=None,
     backend="local",
     backend_config=None,
-    use_conda=True,
     storage_dir=None,
     synchronous=True,
     run_id=None,
+    run_name=None,
+    env_manager=None,
+    build_image=False,
 ):
     """
     Run an MLflow project. The project can be local or stored at a Git URI.
@@ -222,10 +244,6 @@ def run(
                            be passed as config to the backend. The exact content which should be
                            provided is different for each execution backend and is documented
                            at https://www.mlflow.org/docs/latest/projects.html.
-    :param use_conda: If True (the default), create a new Conda environment for the run and
-                      install project dependencies within that environment. Otherwise, run the
-                      project in the current environment without installing any project
-                      dependencies.
     :param storage_dir: Used only if ``backend`` is "local". MLflow downloads artifacts from
                         distributed URIs passed to parameters of type ``path`` to subdirectories of
                         ``storage_dir``.
@@ -239,6 +257,21 @@ def run(
     :param run_id: Note: this argument is used internally by the MLflow project APIs and should
                    not be specified. If specified, the run ID will be used instead of
                    creating a new run.
+    :param run_name: The name to give the MLflow Run associated with the project execution.
+                     If ``None``, the MLflow Run name is left unset.
+    :param env_manager: Specify an environment manager to create a new environment for the run and
+                        install project dependencies within that environment. The following values
+                        are supported:
+
+                        - local: use the local environment
+                        - virtualenv: use virtualenv (and pyenv for Python version management)
+                        - conda: use conda
+
+                        If unspecified, MLflow automatically determines the environment manager to
+                        use by inspecting files in the project directory. For example, if
+                        ``python_env.yaml`` is present, virtualenv will be used.
+    :param build_image: Whether to build a new docker image of the project or to reuse an existing
+                        image. Default: False (reuse an existing image)
     :return: :py:class:`mlflow.projects.SubmittedRun` exposing information (e.g. run ID)
              about the launched run.
 
@@ -281,6 +314,9 @@ def run(
                 )
                 raise
 
+    if env_manager is not None:
+        _EnvManager.validate(env_manager)
+
     if backend == "databricks":
         mlflow.projects.databricks.before_run_validations(mlflow.get_tracking_uri(), backend_config)
     elif backend == "local" and run_id is not None:
@@ -299,9 +335,11 @@ def run(
         docker_args=docker_args,
         backend_name=backend,
         backend_config=backend_config_dict,
-        use_conda=use_conda,
+        env_manager=env_manager,
         storage_dir=storage_dir,
         synchronous=synchronous,
+        run_name=run_name,
+        build_image=build_image,
     )
     if synchronous:
         _wait_for(submitted_run_obj)
@@ -359,7 +397,7 @@ def _parse_kubernetes_config(backend_config):
     kube_config = backend_config.copy()
     if "kube-job-template-path" not in backend_config.keys():
         raise ExecutionException(
-            "'kube-job-template-path' attribute must be specified in " "backend_config."
+            "'kube-job-template-path' attribute must be specified in backend_config."
         )
     kube_job_template = backend_config["kube-job-template-path"]
     if os.path.exists(kube_job_template):

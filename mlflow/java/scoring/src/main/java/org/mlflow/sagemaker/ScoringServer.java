@@ -55,6 +55,8 @@ public class ScoringServer {
 
     ServletContextHandler rootContextHandler = new ServletContextHandler(null, "/");
     rootContextHandler.addServlet(new ServletHolder(new ScoringServer.PingServlet()), "/ping");
+    rootContextHandler.addServlet(new ServletHolder(
+        new ScoringServer.VersionServlet()), "/version");
     rootContextHandler.addServlet(
         new ServletHolder(new ScoringServer.InvocationsServlet(predictor)), "/invocations");
     this.server.setHandler(rootContextHandler);
@@ -77,7 +79,7 @@ public class ScoringServer {
       return (new MLeapLoader()).load(config);
     } catch (IOException e) {
       throw new PredictorLoadingException(
-          "Failed to load the configuration for the MLflow model at the specified path.");
+          "Failed to load the configuration for the MLflow model at the specified path.", e);
     }
   }
 
@@ -163,6 +165,15 @@ public class ScoringServer {
     @Override
     public void doGet(HttpServletRequest request, HttpServletResponse response) {
       response.setStatus(HttpServletResponse.SC_OK);
+    }
+  }
+
+  static class VersionServlet extends HttpServlet {
+    @Override
+    public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.getWriter().print("2.0.2-SNAPSHOT");
+      response.getWriter().close();
     }
   }
 

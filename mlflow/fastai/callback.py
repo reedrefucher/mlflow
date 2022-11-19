@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import logging
 
 import mlflow.tracking
-from mlflow.utils.autologging_utils import ExceptionSafeClass
+from mlflow.utils.autologging_utils import ExceptionSafeClass, get_autologging_config
 from mlflow.fastai import log_model
 
 from fastai.callback.core import Callback
@@ -76,7 +76,8 @@ class __MlflowFastaiCallback(Callback, metaclass=ExceptionSafeClass):
         # Extract function name when `opt_func` is partial function
         if isinstance(self.opt_func, partial):
             mlflow.log_param(
-                self.freeze_prefix + "opt_func", self.opt_func.keywords["opt"].__name__,
+                self.freeze_prefix + "opt_func",
+                self.opt_func.keywords["opt"].__name__,
             )
         else:
             mlflow.log_param(self.freeze_prefix + "opt_func", self.opt_func.__name__)
@@ -114,9 +115,7 @@ class __MlflowFastaiCallback(Callback, metaclass=ExceptionSafeClass):
 
         for param in self.opt.hypers[0]:
             if param not in params_not_to_log:
-                mlflow.log_param(
-                    self.freeze_prefix + param, [h[param] for h in self.opt.hypers],
-                )
+                mlflow.log_param(self.freeze_prefix + param, [h[param] for h in self.opt.hypers])
 
         if hasattr(self.opt, "true_wd"):
             mlflow.log_param(self.freeze_prefix + "true_wd", self.opt.true_wd)
@@ -141,4 +140,9 @@ class __MlflowFastaiCallback(Callback, metaclass=ExceptionSafeClass):
                 cb("after_fit")
 
         if self.log_models:
-            log_model(self.learn, artifact_path="model")
+            registered_model_name = get_autologging_config(
+                mlflow.fastai.FLAVOR_NAME, "registered_model_name", None
+            )
+            log_model(
+                self.learn, artifact_path="model", registered_model_name=registered_model_name
+            )

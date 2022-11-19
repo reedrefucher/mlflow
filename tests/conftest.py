@@ -1,5 +1,7 @@
 import os
 import inspect
+import shutil
+import subprocess
 from unittest import mock
 
 import pytest
@@ -29,7 +31,7 @@ def reset_mock():
 def tracking_uri_mock(tmpdir, request):
     try:
         if "notrackingurimock" not in request.keywords:
-            tracking_uri = path_to_local_sqlite_uri(os.path.join(tmpdir.strpath, "mlruns"))
+            tracking_uri = path_to_local_sqlite_uri(os.path.join(tmpdir.strpath, "mlruns.sqlite"))
             mlflow.set_tracking_uri(tracking_uri)
             os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
         yield tmpdir
@@ -37,6 +39,12 @@ def tracking_uri_mock(tmpdir, request):
         mlflow.set_tracking_uri(None)
         if "notrackingurimock" not in request.keywords:
             del os.environ["MLFLOW_TRACKING_URI"]
+
+
+@pytest.fixture(autouse=True)
+def reset_active_experiment_id():
+    yield
+    mlflow.tracking.fluent._active_experiment_id = None
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -96,3 +104,61 @@ def prevent_infer_pip_requirements_fallback(request):
             yield
     else:
         yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def clean_up_mlruns_directory(request):
+    """
+    Clean up an `mlruns` directory on each test module teardown on CI to save the disk space.
+    """
+    yield
+
+    # Only run this fixture on CI.
+    if "GITHUB_ACTIONS" not in os.environ:
+        return
+
+    mlruns_dir = os.path.join(request.config.rootpath, "mlruns")
+    if os.path.exists(mlruns_dir):
+        try:
+            shutil.rmtree(mlruns_dir)
+        except IOError:
+            if os.name == "nt":
+                raise
+            # `shutil.rmtree` can't remove files owned by root in a docker container.
+            subprocess.run(["sudo", "rm", "-rf", mlruns_dir], check=True)
+
+
+@pytest.fixture
+def mock_s3_bucket():
+    """
+    Creates a mock S3 bucket using moto
+
+    :return: The name of the mock bucket
+    """
+    import boto3
+    import moto
+
+    with moto.mock_s3():
+        bucket_name = "mock-bucket"
+        s3_client = boto3.client("s3")
+        s3_client.create_bucket(Bucket=bucket_name)
+        yield bucket_name
+
+
+class ExtendedMonkeyPatch(pytest.MonkeyPatch):  # type: ignore
+    def setenvs(self, envs, prepend=None):
+        for name, value in envs.items():
+            self.setenv(name, value, prepend)
+
+    def delenvs(self, names, raising=True):
+        for name in names:
+            self.delenv(name, raising)
+
+
+@pytest.fixture
+def monkeypatch():
+    """
+    Overrides the default monkeypatch fixture to use `ExtendedMonkeyPatch`.
+    """
+    with ExtendedMonkeyPatch().context() as mp:
+        yield mp

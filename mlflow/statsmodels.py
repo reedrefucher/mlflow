@@ -12,9 +12,9 @@ statsmodels (native) format
     https://www.statsmodels.org/stable/_modules/statsmodels/base/model.html#Results
 
 """
+import logging
 import os
 import yaml
-import logging
 
 import mlflow
 from mlflow import pyfunc
@@ -31,13 +31,19 @@ from mlflow.utils.environment import (
     _CONDA_ENV_FILE_NAME,
     _REQUIREMENTS_FILE_NAME,
     _CONSTRAINTS_FILE_NAME,
+    _PYTHON_ENV_FILE_NAME,
+    _PythonEnv,
 )
 from mlflow.utils.requirements_utils import _get_pinned_requirement
 from mlflow.utils.file_utils import write_to
 from mlflow.utils.docstring_utils import format_docstring, LOG_MODEL_PARAM_DOCS
-from mlflow.utils.model_utils import _get_flavor_configuration
+from mlflow.utils.model_utils import (
+    _get_flavor_configuration,
+    _validate_and_copy_code_paths,
+    _add_code_from_conf_to_system_path,
+    _validate_and_prepare_target_save_path,
+)
 from mlflow.exceptions import MlflowException
-from mlflow.utils.annotations import experimental
 from mlflow.utils.autologging_utils import (
     log_fn_args_as_params,
     autologging_integration,
@@ -85,6 +91,7 @@ def save_model(
     statsmodels_model,
     path,
     conda_env=None,
+    code_paths=None,
     mlflow_model=None,
     remove_data: bool = False,
     signature: ModelSignature = None,
@@ -99,6 +106,9 @@ def save_model(
                               to be saved.
     :param path: Local path where the model is to be saved.
     :param conda_env: {{ conda_env }}
+    :param code_paths: A list of local filesystem paths to Python file dependencies (or directories
+                       containing file dependencies). These files are *prepended* to the system
+                       path when the model is loaded.
     :param mlflow_model: :py:mod:`mlflow.models.Model` this flavor is being added to.
     :param remove_data: bool. If False (default), then the instance is pickled without changes.
                         If True, then all arrays with length nobs are set to None before
@@ -131,10 +141,10 @@ def save_model(
     _validate_env_arguments(conda_env, pip_requirements, extra_pip_requirements)
 
     path = os.path.abspath(path)
-    if os.path.exists(path):
-        raise MlflowException("Path '{}' already exists".format(path))
+    _validate_and_prepare_target_save_path(path)
     model_data_path = os.path.join(path, STATSMODELS_DATA_SUBPATH)
-    os.makedirs(path)
+    code_dir_subpath = _validate_and_copy_code_paths(code_paths, path)
+
     if mlflow_model is None:
         mlflow_model = Model()
     if signature is not None:
@@ -160,10 +170,15 @@ def save_model(
         mlflow_model,
         loader_module="mlflow.statsmodels",
         data=STATSMODELS_DATA_SUBPATH,
-        env=_CONDA_ENV_FILE_NAME,
+        conda_env=_CONDA_ENV_FILE_NAME,
+        python_env=_PYTHON_ENV_FILE_NAME,
+        code=code_dir_subpath,
     )
     mlflow_model.add_flavor(
-        FLAVOR_NAME, statsmodels_version=statsmodels.__version__, data=STATSMODELS_DATA_SUBPATH
+        FLAVOR_NAME,
+        statsmodels_version=statsmodels.__version__,
+        data=STATSMODELS_DATA_SUBPATH,
+        code=code_dir_subpath,
     )
     mlflow_model.save(os.path.join(path, MLMODEL_FILE_NAME))
 
@@ -173,13 +188,17 @@ def save_model(
             # To ensure `_load_pyfunc` can successfully load the model during the dependency
             # inference, `mlflow_model.save` must be called beforehand to save an MLmodel file.
             inferred_reqs = mlflow.models.infer_pip_requirements(
-                path, FLAVOR_NAME, fallback=default_reqs,
+                path,
+                FLAVOR_NAME,
+                fallback=default_reqs,
             )
             default_reqs = sorted(set(inferred_reqs).union(default_reqs))
         else:
             default_reqs = None
         conda_env, pip_requirements, pip_constraints = _process_pip_requirements(
-            default_reqs, pip_requirements, extra_pip_requirements,
+            default_reqs,
+            pip_requirements,
+            extra_pip_requirements,
         )
     else:
         conda_env, pip_requirements, pip_constraints = _process_conda_env(conda_env)
@@ -194,12 +213,15 @@ def save_model(
     # Save `requirements.txt`
     write_to(os.path.join(path, _REQUIREMENTS_FILE_NAME), "\n".join(pip_requirements))
 
+    _PythonEnv.current().to_yaml(os.path.join(path, _PYTHON_ENV_FILE_NAME))
+
 
 @format_docstring(LOG_MODEL_PARAM_DOCS.format(package_name=FLAVOR_NAME))
 def log_model(
     statsmodels_model,
     artifact_path,
     conda_env=None,
+    code_paths=None,
     registered_model_name=None,
     remove_data: bool = False,
     signature: ModelSignature = None,
@@ -216,6 +238,9 @@ def log_model(
                               to be saved.
     :param artifact_path: Run-relative artifact path.
     :param conda_env: {{ conda_env }}
+    :param code_paths: A list of local filesystem paths to Python file dependencies (or directories
+                       containing file dependencies). These files are *prepended* to the system
+                       path when the model is loaded.
     :param registered_model_name: If given, create a model version under
                                   ``registered_model_name``, also creating a registered model if one
                                   with the given name does not exist.
@@ -248,13 +273,16 @@ def log_model(
                             waits for five minutes. Specify 0 or None to skip waiting.
     :param pip_requirements: {{ pip_requirements }}
     :param extra_pip_requirements: {{ extra_pip_requirements }}
+    :return: A :py:class:`ModelInfo <mlflow.models.model.ModelInfo>` instance that contains the
+             metadata of the logged model.
     """
-    Model.log(
+    return Model.log(
         artifact_path=artifact_path,
         flavor=mlflow.statsmodels,
         registered_model_name=registered_model_name,
         statsmodels_model=statsmodels_model,
         conda_env=conda_env,
+        code_paths=code_paths,
         signature=signature,
         input_example=input_example,
         await_registration_for=await_registration_for,
@@ -273,7 +301,7 @@ def _load_model(path):
 
 def _load_pyfunc(path):
     """
-    Load PyFunc implementation. Called by ``pyfunc.load_pyfunc``.
+    Load PyFunc implementation. Called by ``pyfunc.load_model``.
 
     :param path: Local filesystem path to the MLflow Model with the ``statsmodels`` flavor.
     """
@@ -302,6 +330,7 @@ def load_model(model_uri, dst_path=None):
     """
     local_model_path = _download_artifact_from_uri(artifact_uri=model_uri, output_path=dst_path)
     flavor_conf = _get_flavor_configuration(model_path=local_model_path, flavor_name=FLAVOR_NAME)
+    _add_code_from_conf_to_system_path(local_model_path, flavor_conf)
     statsmodels_model_file_path = os.path.join(
         local_model_path, flavor_conf.get("data", STATSMODELS_DATA_SUBPATH)
     )
@@ -384,7 +413,6 @@ def _get_autolog_metrics(fitted_model):
     return result_metrics
 
 
-@experimental
 @autologging_integration(FLAVOR_NAME)
 def autolog(
     log_models=True,
@@ -392,6 +420,7 @@ def autolog(
     exclusive=False,
     disable_for_unsupported_versions=False,
     silent=False,
+    registered_model_name=None,
 ):  # pylint: disable=unused-argument
     """
     Enables (or disables) and configures automatic logging from statsmodels to MLflow.
@@ -418,6 +447,9 @@ def autolog(
     :param silent: If ``True``, suppress all event logs and warnings from MLflow during statsmodels
                    autologging. If ``False``, show all events and warnings during statsmodels
                    autologging.
+    :param registered_model_name: If given, each time a model is trained, it is registered as a
+                                  new model version of the registered model with this name.
+                                  The registered model is created if it does not already exist.
     """
     import statsmodels
 
@@ -451,8 +483,8 @@ def autolog(
         """
         try:
             superclass = inspect.getmro(klass)[1]
-            overriden = getattr(klass, function_name) is not getattr(superclass, function_name)
-            return overriden
+            overridden = getattr(klass, function_name) is not getattr(superclass, function_name)
+            return overridden
         except (IndexError, AttributeError):
             return False
 
@@ -504,8 +536,15 @@ def autolog(
                 if get_autologging_config(FLAVOR_NAME, "log_models", True):
                     global _save_model_called_from_autolog
                     _save_model_called_from_autolog = True
+                    registered_model_name = get_autologging_config(
+                        FLAVOR_NAME, "registered_model_name", None
+                    )
                     try:
-                        log_model(model, artifact_path="model")
+                        log_model(
+                            model,
+                            artifact_path="model",
+                            registered_model_name=registered_model_name,
+                        )
                     finally:
                         _save_model_called_from_autolog = False
 

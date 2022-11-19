@@ -3,7 +3,7 @@
 # A comma-separated list of package or module names from where C extensions may
 # be loaded. Extensions are loading into the active Python interpreter and may
 # run arbitrary code
-extension-pkg-whitelist=
+extension-pkg-allow-list=
 
 # Add files or directories to the denylist. They should be base names, not
 # paths.
@@ -21,7 +21,8 @@ ignore-paths=setup.py,
              mlflow/protos,
              mlflow/server/js,
              mlflow/store/db_migrations,
-             mlflow/temporary_db_migrations_for_pre_1_users
+             mlflow/temporary_db_migrations_for_pre_1_users,
+             tests/protos
 
 # Python code to execute, usually for sys.path manipulation such as
 # pygtk.require().
@@ -32,7 +33,7 @@ jobs=0
 
 # List of plugins (as comma separated values of python modules names) to load,
 # usually to register additional checkers.
-load-plugins=
+load-plugins=pylint_plugins
 
 # Pickle collected data for later comparisons.
 persistent=yes
@@ -69,15 +70,10 @@ disable=print-statement,
         unpacking-in-except,
         old-raise-syntax,
         backtick,
-        long-suffix,
-        old-ne-operator,
-        old-octal-literal,
         import-star-module-level,
-        non-ascii-bytes-literal,
         raw-checker-failed,
         bad-inline-option,
         locally-disabled,
-        locally-enabled,
         file-ignored,
         suppressed-message,
         useless-suppression,
@@ -121,7 +117,6 @@ disable=print-statement,
         range-builtin-not-iterating,
         filter-builtin-not-iterating,
         using-cmp-argument,
-        eq-without-hash,
         div-method,
         idiv-method,
         rdiv-method,
@@ -137,9 +132,25 @@ disable=print-statement,
         dict-items-not-iterating,
         dict-keys-not-iterating,
         dict-values-not-iterating,
-        # For MLflow, ignore "convention" and "refactor" message types
+        # Convention rules
+        missing-function-docstring,
+        consider-using-f-string,
+        wrong-import-order,
+        import-outside-toplevel,
+        missing-module-docstring,
+        missing-class-docstring,
+        too-many-lines,
+        unidiomatic-typecheck,
+        trailing-whitespace,
+        use-maxsplit-arg,
+        unused-argument,
+        disallowed-name,
+        wrong-import-position,
+        typevar-name-mismatch,
+        unnecessary-dunder-call,
+        use-implicit-booleaness-not-comparison,
+        # For MLflow, ignore "refactor" message types
         # (see all message types at https://docs.pylint.org/en/1.6.0/tutorial.html#getting-started)
-        C,
         R,
         # Additional style-check messages disabled for MLflow
         invalid-name,
@@ -171,13 +182,28 @@ disable=print-statement,
         not-an-iterable,
         unsubscriptable-object,
         unsupported-assignment-operation,
+        attribute-defined-outside-init,
+        subclassed-final-class,
 
 # Enable the message, report, category or checker with the given id(s). You can
 # either give multiple identifier separated by comma (,) or put this option
 # multiple time (only on the command line, not in the configuration file where
 # it should appear only once). See also the "--disable" option for examples.
-enable=c-extension-no-member
-
+enable=c-extension-no-member,
+       line-too-long,
+       use-a-generator,
+       super-with-arguments,
+       useless-object-inheritance,
+       consider-using-from-import,
+       consider-merging-isinstance,
+       consider-using-dict-items,
+       unnecessary-comprehension,
+       consider-using-set-comprehension,
+       singleton-comparison,
+       use-dict-literal,
+       use-list-literal,
+       unnecessary-lambda-assignment
+       
 
 [REPORTS]
 
@@ -329,7 +355,7 @@ variable-naming-style=snake_case
 expected-line-ending-format=
 
 # Regexp for a line that is allowed to be longer than the limit.
-ignore-long-lines=^\s*(# )?<?https?://\S+>?$
+ignore-long-lines=https?://\S+
 
 # Number of spaces of indent required inside a hanging  or continued line.
 indent-after-paren=4
@@ -344,12 +370,6 @@ max-line-length=100
 # Maximum number of lines in a module
 max-module-lines=1000
 
-# List of optional constructs for which whitespace checking is disabled. `dict-
-# separator` is used to allow tabulation in dicts, etc.: {1  : 1,\n222: 2}.
-# `trailing-comma` allows a space between comma and closing bracket: (a, ).
-# `empty-line` allows space-only lines.
-no-space-check=trailing-comma,
-               dict-separator
 
 # Allow the body of a class to be on the same line as the declaration if body
 # contains single statement.

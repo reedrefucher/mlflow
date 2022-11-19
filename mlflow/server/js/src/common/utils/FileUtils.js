@@ -28,13 +28,23 @@ export const IMAGE_EXTENSIONS = new Set(['jpg', 'bmp', 'jpeg', 'png', 'gif', 'sv
 export const TEXT_EXTENSIONS = new Set([
   'txt',
   'log',
-  'py',
-  'js',
+  'err',
+  'cfg',
+  'conf',
+  'cnf',
+  'cf',
+  'ini',
+  'properties',
+  'prop',
+  'hocon',
+  'toml',
   'yaml',
   'yml',
+  'xml',
   'json',
-  'csv',
-  'tsv',
+  'js',
+  'py',
+  'py3',
   'md',
   'rst',
   MLPROJECT_FILE_NAME.toLowerCase(),
@@ -44,3 +54,4 @@ export const TEXT_EXTENSIONS = new Set([
 export const HTML_EXTENSIONS = new Set(['html']);
 export const MAP_EXTENSIONS = new Set(['geojson']);
 export const PDF_EXTENSIONS = new Set(['pdf']);
+export const DATA_EXTENSIONS = new Set(['csv', 'tsv']);

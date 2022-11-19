@@ -19,7 +19,7 @@ _logger = logging.getLogger(__name__)
 AWAIT_MODEL_VERSION_CREATE_SLEEP_DURATION_SECONDS = 3
 
 
-class ModelRegistryClient(object):
+class ModelRegistryClient:
     """
     Client of an MLflow Model Registry Server that creates and manages registered
     models and model versions.
@@ -91,21 +91,6 @@ class ModelRegistryClient(object):
         :param name: Name of the registered model to delete.
         """
         self.store.delete_registered_model(name)
-
-    def list_registered_models(
-        self, max_results=SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT, page_token=None
-    ):
-        """
-        List of all registered models.
-        :param max_results: Maximum number of registered models desired.
-        :param page_token: Token specifying the next page of results. It should be obtained from
-                            a ``list_registered_models`` call.
-
-        :return: A PagedList of :py:class:`mlflow.entities.model_registry.RegisteredModel` objects
-                that satisfy the search expressions. The pagination token for the next page can be
-                obtained via the ``token`` attribute of the object.
-        """
-        return self.store.list_registered_models(max_results, page_token)
 
     def search_registered_models(
         self,
@@ -248,7 +233,7 @@ class ModelRegistryClient(object):
         :param version: Registered model version.
         :param stage: New desired stage for this model version.
         :param archive_existing_versions: If this flag is set to ``True``, all existing model
-            versions in the stage will be automically moved to the "archived" stage. Only valid
+            versions in the stage will be automatically moved to the "archived" stage. Only valid
             when ``stage`` is ``"staging"`` or ``"production"`` otherwise an error will be raised.
 
         :return: A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.

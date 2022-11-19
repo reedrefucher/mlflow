@@ -10,6 +10,7 @@ import signal
 import shutil
 from subprocess import check_call, Popen
 import sys
+import logging
 
 from pkg_resources import resource_filename
 
@@ -20,8 +21,10 @@ from mlflow import pyfunc, mleap
 from mlflow.models import Model
 from mlflow.models.model import MLMODEL_FILE_NAME
 from mlflow.models.docker_utils import DISABLE_ENV_CREATION
-from mlflow.pyfunc import scoring_server, mlserver
+from mlflow.pyfunc import scoring_server, mlserver, _extract_conda_env
 from mlflow.version import VERSION as MLFLOW_VERSION
+from mlflow.utils import env_manager as em
+from mlflow.utils.virtualenv import _get_or_create_virtualenv
 
 MODEL_PATH = "/opt/ml/model"
 
@@ -38,15 +41,20 @@ SUPPORTED_FLAVORS = [pyfunc.FLAVOR_NAME, mleap.FLAVOR_NAME]
 DISABLE_NGINX = "DISABLE_NGINX"
 ENABLE_MLSERVER = "ENABLE_MLSERVER"
 
+SERVING_ENVIRONMENT = "SERVING_ENVIRONMENT"
 
-def _init(cmd):
+
+_logger = logging.getLogger(__name__)
+
+
+def _init(cmd, env_manager):
     """
     Initialize the container and execute command.
 
     :param cmd: Command param passed by Sagemaker. Can be  "serve" or "train" (unimplemented).
     """
     if cmd == "serve":
-        _serve()
+        _serve(env_manager)
     elif cmd == "train":
         _train()
     else:
@@ -55,7 +63,7 @@ def _init(cmd):
         )
 
 
-def _serve():
+def _serve(env_manager):
     """
     Serve the model.
 
@@ -73,18 +81,20 @@ def _serve():
     if serving_flavor == mleap.FLAVOR_NAME:
         _serve_mleap()
     elif pyfunc.FLAVOR_NAME in m.flavors:
-        _serve_pyfunc(m)
+        _serve_pyfunc(m, env_manager)
     else:
         raise Exception("This container only supports models with the MLeap or PyFunc flavors.")
 
 
-def _install_pyfunc_deps(model_path=None, install_mlflow=False, enable_mlserver=False):
+def _install_pyfunc_deps(
+    model_path=None, install_mlflow=False, enable_mlserver=False, env_manager=em.VIRTUALENV
+):
     """
     Creates a conda env for serving the model at the specified path and installs almost all serving
     dependencies into the environment - MLflow is not installed as it's not available via conda.
     """
     # If model is a pyfunc model, create its conda env (even if it also has mleap flavor)
-    has_env = False
+    activate_cmd = []
     if model_path:
         model_config_path = os.path.join(model_path, MLMODEL_FILE_NAME)
         model = Model.load(model_config_path)
@@ -94,29 +104,37 @@ def _install_pyfunc_deps(model_path=None, install_mlflow=False, enable_mlserver=
             return
         conf = model.flavors[pyfunc.FLAVOR_NAME]
         if pyfunc.ENV in conf:
-            print("creating and activating custom environment")
-            env = conf[pyfunc.ENV]
+            _logger.info("creating and activating custom environment")
+            env = _extract_conda_env(conf[pyfunc.ENV])
             env_path_dst = os.path.join("/opt/mlflow/", env)
             env_path_dst_dir = os.path.dirname(env_path_dst)
             if not os.path.exists(env_path_dst_dir):
                 os.makedirs(env_path_dst_dir)
             shutil.copyfile(os.path.join(MODEL_PATH, env), env_path_dst)
-            conda_create_model_env = "conda env create -n custom_env -f {}".format(env_path_dst)
-            if Popen(["bash", "-c", conda_create_model_env]).wait() != 0:
-                raise Exception("Failed to create model environment.")
-            has_env = True
-    activate_cmd = ["source /miniconda/bin/activate custom_env"] if has_env else []
+            if env_manager == em.CONDA:
+                conda_create_model_env = "conda env create -n custom_env -f {}".format(env_path_dst)
+                if Popen(["bash", "-c", conda_create_model_env]).wait() != 0:
+                    raise Exception("Failed to create model environment.")
+                activate_cmd = ["source /miniconda/bin/activate custom_env"]
+            elif env_manager == em.VIRTUALENV:
+                env_activate_cmd = _get_or_create_virtualenv(model_path)
+                path = env_activate_cmd.split(" ")[-1]
+                os.symlink(path, "/opt/activate")
+                activate_cmd = [env_activate_cmd]
+
     # NB: install gunicorn[gevent] from pip rather than from conda because gunicorn is already
     # dependency of mlflow on pip and we expect mlflow to be part of the environment.
     server_deps = ["gunicorn[gevent]"]
     if enable_mlserver:
-        server_deps = ["mlserver", "mlserver-mlflow"]
+        # NOTE: Pin version until the next MLflow release (otherwise it won't
+        # pick up the requirements on the current's `setup.py`)
+        server_deps = ["'mlserver>=1.2.0.dev13'", "'mlserver-mlflow>=1.2.0.dev13'"]
 
     install_server_deps = [f"pip install {' '.join(server_deps)}"]
     if Popen(["bash", "-c", " && ".join(activate_cmd + install_server_deps)]).wait() != 0:
         raise Exception("Failed to install serving dependencies into the model environment.")
 
-    if has_env and install_mlflow:
+    if len(activate_cmd) and install_mlflow:
         install_mlflow_cmd = [
             "pip install /opt/mlflow/."
             if _container_includes_mlflow_source()
@@ -124,9 +142,10 @@ def _install_pyfunc_deps(model_path=None, install_mlflow=False, enable_mlserver=
         ]
         if Popen(["bash", "-c", " && ".join(activate_cmd + install_mlflow_cmd)]).wait() != 0:
             raise Exception("Failed to install mlflow into the model environment.")
+    return activate_cmd
 
 
-def _serve_pyfunc(model):
+def _serve_pyfunc(model, env_manager):
     # option to disable manually nginx. The default behavior is to enable nginx.
     disable_nginx = os.getenv(DISABLE_NGINX, "false").lower() == "true"
     enable_mlserver = os.getenv(ENABLE_MLSERVER, "false").lower() == "true"
@@ -136,9 +155,16 @@ def _serve_pyfunc(model):
     bash_cmds = []
     if pyfunc.ENV in conf:
         if not disable_env_creation:
-            _install_pyfunc_deps(MODEL_PATH, install_mlflow=True, enable_mlserver=enable_mlserver)
-        bash_cmds += ["source /miniconda/bin/activate custom_env"]
-
+            _install_pyfunc_deps(
+                MODEL_PATH,
+                install_mlflow=True,
+                enable_mlserver=enable_mlserver,
+                env_manager=env_manager,
+            )
+        if env_manager == em.CONDA:
+            bash_cmds.append("source /miniconda/bin/activate custom_env")
+        elif env_manager == em.VIRTUALENV:
+            bash_cmds.append("source /opt/activate")
     procs = []
 
     start_nginx = True
@@ -161,9 +187,6 @@ def _serve_pyfunc(model):
         procs.append(nginx)
 
     cpu_count = multiprocessing.cpu_count()
-    os.system("pip -V")
-    os.system("python -V")
-    os.system('python -c"from mlflow.version import VERSION as V; print(V)"')
 
     inference_server = mlserver if enable_mlserver else scoring_server
     # Since MLServer will run without NGINX, expose the server in the `8080`
@@ -223,7 +246,7 @@ def _sigterm_handler(pids):
     Attempt to kill all launched processes and exit.
 
     """
-    print("Got sigterm signal, exiting.")
+    _logger.info("Got sigterm signal, exiting.")
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)

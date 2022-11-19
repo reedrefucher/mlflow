@@ -1,5 +1,4 @@
 import {
-  LIST_REGISTERED_MODELS,
   SEARCH_REGISTERED_MODELS,
   SEARCH_MODEL_VERSIONS,
   GET_REGISTERED_MODEL,
@@ -19,9 +18,7 @@ import { RegisteredModelTag, ModelVersionTag } from './sdk/ModelRegistryMessages
 
 const modelByName = (state = {}, action) => {
   switch (action.type) {
-    case fulfilled(SEARCH_REGISTERED_MODELS):
-    // eslint-disable-next-line no-fallthrough
-    case fulfilled(LIST_REGISTERED_MODELS): {
+    case fulfilled(SEARCH_REGISTERED_MODELS): {
       const models = action.payload[getProtoField('registered_models')];
       const nameToModelMap = {};
       if (models) {
@@ -41,6 +38,9 @@ const modelByName = (state = {}, action) => {
         ...state[modelName],
         ...detailedModel,
       };
+      if (_.isEqual(modelWithUpdatedMetadata, state[modelName])) {
+        return state;
+      }
       return {
         ...state,
         ...{ [modelName]: modelWithUpdatedMetadata },
@@ -65,6 +65,9 @@ const modelVersionsByModel = (state = {}, action) => {
         ...state[modelName],
         [modelVersion.version]: modelVersion,
       };
+      if (_.isEqual(state[modelName], updatedMap)) {
+        return state;
+      }
       return {
         ...state,
         [modelName]: updatedMap,
@@ -75,9 +78,8 @@ const modelVersionsByModel = (state = {}, action) => {
       if (!modelVersions) {
         return state;
       }
-
       // Merge all modelVersions into the store
-      return modelVersions.reduce(
+      const newModelVersions = modelVersions.reduce(
         (newState, modelVersion) => {
           const { name, version } = modelVersion;
           return {
@@ -90,6 +92,11 @@ const modelVersionsByModel = (state = {}, action) => {
         },
         { ...state },
       );
+
+      if (_.isEqual(state, newModelVersions)) {
+        return state;
+      }
+      return newModelVersions;
     }
     case fulfilled(DELETE_MODEL_VERSION): {
       const { modelName, version } = action.meta;
@@ -187,7 +194,7 @@ const tagsByRegisteredModel = (state = {}, action) => {
         const { tags } = detailedModel;
         const newState = { ...state };
         newState[modelName] = tagArrToObject(tags);
-        return newState;
+        return _.isEqual(newState, state) ? state : newState;
       } else {
         return state;
       }
@@ -300,10 +307,12 @@ export const getModelVersionTags = (modelName, version, state) => {
   }
 };
 
-export default {
+const reducers = {
   modelByName,
   modelVersionsByModel,
   tagsByRegisteredModel,
   tagsByModelVersion,
   mlModelArtifactByModelVersion,
 };
+
+export default reducers;

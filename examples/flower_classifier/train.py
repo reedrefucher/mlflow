@@ -135,7 +135,7 @@ class MLflowLogger(Callback):
         valid_res = self._model.evaluate(x=x, y=y)
         for name, value in zip(self._model.metrics_names, valid_res):
             mlflow.log_metric("valid_{}".format(name), value)
-        log_model(keras_model=self._model, **self._pyfunc_params)
+        log_model(model=self._model, **self._pyfunc_params)
 
 
 def _imagenet_preprocess_tf(x):
@@ -179,7 +179,7 @@ def train(
     :param image_width: Width of the input image in pixels.
     :param image_files: List of image files to be used for training.
     :param labels: List of labels for the image files.
-    :param domain: Dictionary representing the domain of the reponse.
+    :param domain: Dictionary representing the domain of the response.
                    Provides mapping label-name -> label-id.
     :param epochs: Number of epochs to train the model for.
     :param batch_size: Batch size used during training.

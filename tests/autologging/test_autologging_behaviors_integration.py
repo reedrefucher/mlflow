@@ -11,7 +11,7 @@ from itertools import permutations
 from unittest import mock
 
 import mlflow
-from mlflow.tracking import MlflowClient
+from mlflow import MlflowClient
 from mlflow.utils import gorilla
 from mlflow.utils.autologging_utils import (
     safe_patch,
@@ -23,12 +23,8 @@ from tests.autologging.fixtures import test_mode_off
 from tests.autologging.fixtures import reset_stderr  # pylint: disable=unused-import
 
 
-pytestmark = pytest.mark.large
-
-
 AUTOLOGGING_INTEGRATIONS_TO_TEST = {
     mlflow.sklearn: "sklearn",
-    mlflow.keras: "keras",
     mlflow.xgboost: "xgboost",
     mlflow.lightgbm: "lightgbm",
     mlflow.pytorch: "torch",
@@ -37,6 +33,7 @@ AUTOLOGGING_INTEGRATIONS_TO_TEST = {
     mlflow.statsmodels: "statsmodels",
     mlflow.spark: "pyspark",
     mlflow.pyspark.ml: "pyspark",
+    mlflow.tensorflow: "tensorflow",
 }
 
 
@@ -84,20 +81,49 @@ def test_autologging_integrations_expose_configs_and_support_disablement(integra
 
 @pytest.mark.parametrize("integration", AUTOLOGGING_INTEGRATIONS_TO_TEST.keys())
 def test_autologging_integrations_use_safe_patch_for_monkey_patching(integration):
-    for integration in AUTOLOGGING_INTEGRATIONS_TO_TEST:
-        with mock.patch(
-            "mlflow.utils.gorilla.apply", wraps=gorilla.apply
-        ) as gorilla_mock, mock.patch(
-            integration.__name__ + ".safe_patch", wraps=safe_patch
-        ) as safe_patch_mock:
+    with mock.patch("mlflow.utils.gorilla.apply", wraps=gorilla.apply) as gorilla_mock, mock.patch(
+        integration.__name__ + ".safe_patch", wraps=safe_patch
+    ) as safe_patch_mock:
+        # In `mlflow.xgboost.autolog()` and `mlflow.lightgbm.autolog()`,
+        # we enable autologging for XGBoost and LightGBM sklearn models
+        # using `mlflow.sklearn._autolog()`. So besides `safe_patch` calls in
+        # `autolog()`, we need to count additional `safe_patch` calls
+        # in sklearn autologging routine as well.
+        if integration.__name__ in ["mlflow.xgboost", "mlflow.lightgbm"]:
+            with mock.patch(
+                "mlflow.sklearn.safe_patch", wraps=safe_patch
+            ) as sklearn_safe_patch_mock:
+                integration.autolog(disable=False)
+                safe_patch_call_count = (
+                    safe_patch_mock.call_count + sklearn_safe_patch_mock.call_count
+                )
+
+                # Assert autolog integrations use the fluent API for run management. This is to
+                # ensure certain fluent API methods like mlflow.last_active_run behaves as expected.
+                assert any(
+                    kwargs["manage_run"]
+                    for _, kwargs in sklearn_safe_patch_mock.call_args_list
+                    if "manage_run" in kwargs
+                )
+        else:
             integration.autolog(disable=False)
-            assert safe_patch_mock.call_count > 0
-            # `safe_patch` leverages `gorilla.apply` in its implementation. Accordingly, we expect
-            # that the total number of `gorilla.apply` calls to be equivalent to the number of
-            # `safe_patch` calls. This verifies that autologging integrations are leveraging
-            # `safe_patch`, rather than calling `gorilla.apply` directly (which does not provide
-            # exception safety properties)
-            assert safe_patch_mock.call_count == gorilla_mock.call_count
+            safe_patch_call_count = safe_patch_mock.call_count
+
+        if integration.__name__ != "mlflow.spark":
+            # Assert autolog integrations use the fluent API for run management. This is to
+            # ensure certain fluent API methods like mlflow.last_active_run behaves as expected.
+            assert any(
+                kwargs["manage_run"]
+                for _, kwargs in safe_patch_mock.call_args_list
+                if "manage_run" in kwargs
+            )
+        assert safe_patch_call_count > 0
+        # `safe_patch` leverages `gorilla.apply` in its implementation. Accordingly, we expect
+        # that the total number of `gorilla.apply` calls to be equivalent to the number of
+        # `safe_patch` calls. This verifies that autologging integrations are leveraging
+        # `safe_patch`, rather than calling `gorilla.apply` directly (which does not provide
+        # exception safety properties)
+        assert safe_patch_call_count == gorilla_mock.call_count
 
 
 def test_autolog_respects_exclusive_flag(setup_sklearn_model):
@@ -251,7 +277,7 @@ def test_autolog_respects_silent_mode(tmpdir):
             e = executor.submit(train_model)
             executions.append(e)
 
-    assert all([e.result() is True for e in executions])
+    assert all(e.result() is True for e in executions)
     assert not stream.getvalue()
     # Verify that `warnings.showwarning` was restored to its original value after training
     # and that MLflow event logs are enabled
@@ -269,7 +295,7 @@ def test_autolog_respects_silent_mode(tmpdir):
             e = executor.submit(train_model)
             executions.append(e)
 
-    assert all([e.result() is True for e in executions])
+    assert all(e.result() is True for e in executions)
     assert stream.getvalue()
     # Verify that `warnings.showwarning` was restored to its original value after training
     # and that MLflow event logs are enabled
@@ -287,9 +313,9 @@ def test_autolog_globally_configured_flag_set_correctly():
     from mlflow.utils.autologging_utils import AUTOLOGGING_INTEGRATIONS
 
     AUTOLOGGING_INTEGRATIONS.clear()
-    import sklearn  # pylint: disable=unused-import,unused-variable
-    import pyspark  # pylint: disable=unused-import,unused-variable
-    import pyspark.ml  # pylint: disable=unused-import,unused-variable
+    import sklearn  # pylint: disable=unused-import
+    import pyspark  # pylint: disable=unused-import
+    import pyspark.ml  # pylint: disable=unused-import
 
     integrations_to_test = ["sklearn", "spark", "pyspark.ml"]
     mlflow.autolog()

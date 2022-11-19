@@ -9,13 +9,12 @@ import databricks_cli
 import pytest
 
 import mlflow
-from mlflow import cli
+from mlflow import cli, MlflowClient
 from mlflow.exceptions import MlflowException
 from mlflow.projects.databricks import DatabricksJobRunner, _get_cluster_mlflow_run_cmd
 from mlflow.protos.databricks_pb2 import ErrorCode, INVALID_PARAMETER_VALUE
 from mlflow.entities import RunStatus
 from mlflow.projects import databricks, ExecutionException
-from mlflow.tracking import MlflowClient
 from mlflow.utils import file_utils
 from mlflow.store.tracking.file_store import FileStore
 from mlflow.utils.mlflow_tags import (
@@ -23,7 +22,9 @@ from mlflow.utils.mlflow_tags import (
     MLFLOW_DATABRICKS_SHELL_JOB_RUN_ID,
     MLFLOW_DATABRICKS_WEBAPP_URL,
 )
-from mlflow.utils.rest_utils import _DEFAULT_HEADERS
+from mlflow.tracking.request_header.default_request_header_provider import (
+    DefaultRequestHeaderProvider,
+)
 from mlflow.utils.uri import construct_db_uri_from_profile
 from tests import helper_functions
 from tests.integration.utils import invoke_cli_runner
@@ -72,7 +73,7 @@ def databricks_cluster_mlflow_run_cmd_mock():
 @pytest.fixture()
 def cluster_spec_mock(tmpdir):
     cluster_spec_handle = tmpdir.join("cluster_spec.json")
-    cluster_spec_handle.write(json.dumps(dict()))
+    cluster_spec_handle.write(json.dumps({}))
     yield str(cluster_spec_handle)
 
 
@@ -108,7 +109,7 @@ def dbfs_mocks(dbfs_path_exists_mock, upload_to_dbfs_mock):  # pylint: disable=u
 
 
 @pytest.fixture()
-def before_run_validations_mock():  # pylint: disable=unused-argument
+def before_run_validations_mock():
     with mock.patch("mlflow.projects.databricks.before_run_validations"):
         yield
 
@@ -142,7 +143,7 @@ def run_databricks_project(cluster_spec, **kwargs):
         backend="databricks",
         backend_config=cluster_spec,
         parameters={"alpha": "0.4"},
-        **kwargs
+        **kwargs,
     )
 
 
@@ -206,38 +207,37 @@ def test_dbfs_path_exists_error_response_handling(response_mock):
         http_request_mock.return_value = response_mock
 
         # then _dbfs_path_exists should return a MlflowException
-        with pytest.raises(MlflowException):
+        with pytest.raises(MlflowException, match="API request to check existence of file at DBFS"):
             job_runner._dbfs_path_exists("some/path")
 
 
 def test_run_databricks_validations(
     tmpdir,
-    cluster_spec_mock,  # pylint: disable=unused-argument
-    tracking_uri_mock,
+    monkeypatch,
+    cluster_spec_mock,
     dbfs_mocks,
     set_tag_mock,
 ):  # pylint: disable=unused-argument
     """
     Tests that running on Databricks fails before making any API requests if validations fail.
     """
-    with mock.patch.dict(
-        os.environ, {"DATABRICKS_HOST": "test-host", "DATABRICKS_TOKEN": "foo"}
-    ), mock.patch(
+    monkeypatch.setenvs({"DATABRICKS_HOST": "test-host", "DATABRICKS_TOKEN": "foo"})
+    with mock.patch(
         "mlflow.projects.databricks.DatabricksJobRunner._databricks_api_request"
     ) as db_api_req_mock:
         # Test bad tracking URI
-        tracking_uri_mock.return_value = tmpdir.strpath
-        with pytest.raises(ExecutionException):
+        mlflow.set_tracking_uri(tmpdir.strpath)
+        with pytest.raises(ExecutionException, match="MLflow tracking URI must be of"):
             run_databricks_project(cluster_spec_mock, synchronous=True)
         assert db_api_req_mock.call_count == 0
         db_api_req_mock.reset_mock()
-        mlflow_service = mlflow.tracking.MlflowClient()
-        assert (
-            len(mlflow_service.list_run_infos(experiment_id=FileStore.DEFAULT_EXPERIMENT_ID)) == 0
-        )
-        tracking_uri_mock.return_value = "http://"
+        mlflow_service = MlflowClient()
+        assert len(mlflow_service.search_runs([FileStore.DEFAULT_EXPERIMENT_ID])) == 0
+        mlflow.set_tracking_uri("databricks")
         # Test misspecified parameters
-        with pytest.raises(ExecutionException):
+        with pytest.raises(
+            ExecutionException, match="No value given for missing parameters: 'name'"
+        ):
             mlflow.projects.run(
                 TEST_PROJECT_DIR,
                 backend="databricks",
@@ -247,7 +247,7 @@ def test_run_databricks_validations(
         assert db_api_req_mock.call_count == 0
         db_api_req_mock.reset_mock()
         # Test bad cluster spec
-        with pytest.raises(ExecutionException):
+        with pytest.raises(ExecutionException, match="Backend spec must be provided"):
             mlflow.projects.run(
                 TEST_PROJECT_DIR, backend="databricks", synchronous=True, backend_config=None
             )
@@ -380,9 +380,10 @@ def test_run_databricks_throws_exception_when_spec_uses_existing_cluster():
         existing_cluster_spec = {
             "existing_cluster_id": "1000-123456-clust1",
         }
-        with pytest.raises(MlflowException) as exc:
+        with pytest.raises(
+            MlflowException, match="execution against existing clusters is not currently supported"
+        ) as exc:
             run_databricks_project(cluster_spec=existing_cluster_spec)
-        assert "execution against existing clusters is not currently supported" in exc.value.message
         assert exc.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
 
 
@@ -407,7 +408,7 @@ def test_run_databricks_cancel(
         assert runs_cancel_mock.call_count == 1
         # Test that we raise an exception when a blocking Databricks run fails
         runs_get_mock.return_value = mock_runs_get_result(succeeded=False)
-        with pytest.raises(mlflow.projects.ExecutionException):
+        with pytest.raises(mlflow.projects.ExecutionException, match=r"Run \(ID '.+'\) failed"):
             run_databricks_project(cluster_spec_mock, synchronous=True)
 
 
@@ -438,7 +439,7 @@ def test_databricks_http_request_integration(get_config, request):
     """Confirms that the databricks http request params can in fact be used as an HTTP request"""
 
     def confirm_request_params(*args, **kwargs):
-        headers = dict(_DEFAULT_HEADERS)
+        headers = DefaultRequestHeaderProvider().request_headers()
         headers["Authorization"] = "Basic dXNlcjpwYXNz"
         assert args == ("PUT", "host/clusters/list")
         assert kwargs == {
@@ -473,13 +474,19 @@ def test_run_databricks_failed(_):
         text = '{"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "Node type not supported"}'
         m.return_value = mock.Mock(text=text, status_code=400)
         runner = DatabricksJobRunner(construct_db_uri_from_profile("profile"))
-        with pytest.raises(MlflowException):
+        with pytest.raises(
+            MlflowException, match="RESOURCE_DOES_NOT_EXIST: Node type not supported"
+        ):
             runner._run_shell_command_job("/project", "command", {}, {})
 
 
 def test_run_databricks_generates_valid_mlflow_run_cmd():
     cmd = _get_cluster_mlflow_run_cmd(
-        project_dir="my_project_dir", run_id="hi", entry_point="main", parameters={"a": "b"}
+        project_dir="my_project_dir",
+        run_id="hi",
+        entry_point="main",
+        parameters={"a": "b"},
+        env_manager="conda",
     )
     assert cmd[0] == "mlflow"
     with mock.patch("mlflow.projects.run"):

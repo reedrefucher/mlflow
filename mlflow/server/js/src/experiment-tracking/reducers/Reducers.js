@@ -4,19 +4,25 @@ import {
   GET_EXPERIMENT_API,
   GET_RUN_API,
   LIST_ARTIFACTS_API,
-  LIST_EXPERIMENTS_API,
+  SEARCH_EXPERIMENTS_API,
   OPEN_ERROR_MODAL,
   SEARCH_RUNS_API,
   LOAD_MORE_RUNS_API,
   SET_EXPERIMENT_TAG_API,
   SET_TAG_API,
   DELETE_TAG_API,
+  SET_COMPARE_EXPERIMENTS,
 } from '../actions';
 import { Experiment, Param, RunInfo, RunTag, ExperimentTag } from '../sdk/MlflowMessages';
 import { ArtifactNode } from '../utils/ArtifactUtils';
-import { metricsByRunUuid, latestMetricsByRunUuid } from './MetricReducer';
+import {
+  metricsByRunUuid,
+  latestMetricsByRunUuid,
+  minMetricsByRunUuid,
+  maxMetricsByRunUuid,
+} from './MetricReducer';
 import modelRegistryReducers from '../../model-registry/reducers';
-import _ from 'lodash';
+import _, { isArray } from 'lodash';
 import {
   fulfilled,
   isFulfilledApi,
@@ -26,6 +32,7 @@ import {
 } from '../../common/utils/ActionUtils';
 import { SEARCH_MODEL_VERSIONS } from '../../model-registry/actions';
 import { getProtoField } from '../../model-registry/utils';
+import Utils from '../../common/utils/Utils';
 
 export const getExperiments = (state) => {
   return Object.values(state.entities.experimentsById);
@@ -37,7 +44,7 @@ export const getExperiment = (id, state) => {
 
 export const experimentsById = (state = {}, action) => {
   switch (action.type) {
-    case fulfilled(LIST_EXPERIMENTS_API): {
+    case fulfilled(SEARCH_EXPERIMENTS_API): {
       let newState = Object.assign({}, state);
       if (action.payload && action.payload.experiments) {
         // reset experimentsById state
@@ -54,9 +61,18 @@ export const experimentsById = (state = {}, action) => {
     }
     case fulfilled(GET_EXPERIMENT_API): {
       const { experiment } = action.payload;
+
+      // getExperiment API response might not contain all relevant fields,
+      // thus instead of overwriting it, we rather want to merge the new data
+      // into the existing record. We're replacing it only if no experiment
+      // with this ID exists in the state.
+      const mergedExperiment =
+        state[experiment.experiment_id]?.mergeDeep(Experiment.fromJs(experiment)) ||
+        Experiment.fromJs(experiment);
+
       return {
         ...state,
-        [experiment.experiment_id]: Experiment.fromJs(experiment),
+        [experiment.experiment_id]: mergedExperiment,
       };
     }
     default:
@@ -66,6 +82,22 @@ export const experimentsById = (state = {}, action) => {
 
 export const getRunInfo = (runUuid, state) => {
   return state.entities.runInfosByUuid[runUuid];
+};
+
+export const runUuidsMatchingFilter = (state = [], action) => {
+  switch (action.type) {
+    case fulfilled(SEARCH_RUNS_API):
+    case fulfilled(LOAD_MORE_RUNS_API): {
+      const isLoadingMore = action.type === fulfilled(LOAD_MORE_RUNS_API);
+      const newState = isLoadingMore ? [...state] : [];
+      if (isArray(action.payload?.runsMatchingFilter)) {
+        newState.push(...action.payload.runsMatchingFilter.map(({ info }) => info.run_uuid));
+      }
+      return newState;
+    }
+    default:
+      return state;
+  }
 };
 
 export const runInfosByUuid = (state = {}, action) => {
@@ -88,11 +120,11 @@ export const runInfosByUuid = (state = {}, action) => {
       return {};
     }
     case fulfilled(LOAD_MORE_RUNS_API): {
-      let newState = { ...state };
+      const newState = { ...state };
       if (action.payload && action.payload.runs) {
         action.payload.runs.forEach((rJson) => {
           const runInfo = RunInfo.fromJs(rJson.info);
-          newState = amendRunInfosByUuid(newState, runInfo);
+          newState[runInfo.getRunUuid()] = runInfo;
         });
       }
       return newState;
@@ -120,6 +152,9 @@ export const modelVersionsByRunUuid = (state = {}, action) => {
         }
       }
       newState = { ...newState, ...updatedState };
+      if (_.isEqual(state, newState)) {
+        return state;
+      }
       return newState;
     }
     default:
@@ -325,7 +360,7 @@ export const artifactsByRunUuid = (state = {}, action) => {
             curArtifactNode.setChildren(files);
           }
         } catch (err) {
-          console.error(err);
+          Utils.logErrorAndNotifyUser(`Unable to construct the artifact tree.`);
         }
       }
       return {
@@ -360,8 +395,11 @@ export const artifactRootUriByRunUuid = (state = {}, action) => {
 export const entities = combineReducers({
   experimentsById,
   runInfosByUuid,
+  runUuidsMatchingFilter,
   metricsByRunUuid,
   latestMetricsByRunUuid,
+  minMetricsByRunUuid,
+  maxMetricsByRunUuid,
   paramsByRunUuid,
   tagsByRunUuid,
   experimentTagsByExperimentId,
@@ -395,19 +433,53 @@ export const getApis = (requestIds, state) => {
 
 export const apis = (state = {}, action) => {
   if (isPendingApi(action)) {
+    if (!action?.meta?.id) {
+      return state;
+    }
     return {
       ...state,
       [action.meta.id]: { id: action.meta.id, active: true },
     };
   } else if (isFulfilledApi(action)) {
+    if (!action?.meta?.id) {
+      return state;
+    }
     return {
       ...state,
       [action.meta.id]: { id: action.meta.id, active: false, data: action.payload },
     };
   } else if (isRejectedApi(action)) {
+    if (!action?.meta?.id) {
+      return state;
+    }
     return {
       ...state,
       [action.meta.id]: { id: action.meta.id, active: false, error: action.payload },
+    };
+  } else {
+    return state;
+  }
+};
+
+// This state is used in the following components to show a breadcrumb link for navigating back to
+// the compare-experiments page.
+// - RunView
+// - CompareRunView
+// - MetricView
+const defaultCompareExperimentsState = {
+  // Experiment IDs compared on `/compare-experiments`.
+  comparedExperimentIds: [],
+  // Indicates whether the user has navigated to `/compare-experiments` before
+  // Should be set to false when the user navigates to `/experiments/<experiment_id>`
+  hasComparedExperimentsBefore: false,
+};
+export const compareExperiments = (state = defaultCompareExperimentsState, action) => {
+  if (action.type === SET_COMPARE_EXPERIMENTS) {
+    const { comparedExperimentIds, hasComparedExperimentsBefore } = action.payload;
+    return {
+      ...state,
+      comparedExperimentIds,
+      hasComparedExperimentsBefore,
     };
   } else {
     return state;
@@ -446,7 +518,7 @@ const errorModal = (state = errorModalDefault, action) => {
   }
 };
 
-const views = combineReducers({
+export const views = combineReducers({
   errorModal,
 });
 
@@ -454,6 +526,7 @@ export const rootReducer = combineReducers({
   entities,
   views,
   apis,
+  compareExperiments,
 });
 
 export const getEntities = (state) => {

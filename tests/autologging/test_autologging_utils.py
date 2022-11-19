@@ -9,7 +9,7 @@ from unittest import mock
 
 import mlflow
 from mlflow.utils import gorilla
-from mlflow.tracking.client import MlflowClient
+from mlflow import MlflowClient
 from mlflow.utils.autologging_utils import (
     AUTOLOGGING_INTEGRATIONS,
     log_fn_args_as_params,
@@ -34,9 +34,6 @@ from mlflow.utils.autologging_utils.versioning import (
 )
 
 from tests.autologging.fixtures import test_mode_off
-
-
-pytestmark = pytest.mark.large
 
 
 # Example function signature we are testing on
@@ -112,10 +109,10 @@ log_test_args = [
 ]
 
 
-@pytest.mark.parametrize("args,kwargs,expected", log_test_args)
+@pytest.mark.parametrize(("args", "kwargs", "expected"), log_test_args)
 def test_log_fn_args_as_params(args, kwargs, expected, start_run):  # pylint: disable=W0613
     log_fn_args_as_params(dummy_fn, args, kwargs)
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     params = client.get_run(mlflow.active_run().info.run_id).data.params
     for arg, value in zip(["arg1", "arg2", "arg3"], expected):
         assert arg in params
@@ -125,7 +122,7 @@ def test_log_fn_args_as_params(args, kwargs, expected, start_run):  # pylint: di
 def test_log_fn_args_as_params_ignores_unwanted_parameters(start_run):  # pylint: disable=W0613
     args, kwargs, unlogged = ("arg1", {"arg2": "value"}, ["arg1", "arg2", "arg3"])
     log_fn_args_as_params(dummy_fn, args, kwargs, unlogged)
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     params = client.get_run(mlflow.active_run().info.run_id).data.params
     assert len(params.keys()) == 0
 
@@ -261,13 +258,13 @@ def test_avoids_inferring_signature_if_not_needed(logger):
     logger.warning.assert_not_called()
 
 
-def test_batch_metrics_logger_logs_all_metrics(start_run,):
+def test_batch_metrics_logger_logs_all_metrics(start_run):
     run_id = mlflow.active_run().info.run_id
     with batch_metrics_logger(run_id) as metrics_logger:
         for i in range(100):
             metrics_logger.record_metrics({hex(i): i}, i)
 
-    metrics_on_run = mlflow.tracking.MlflowClient().get_run(run_id).data.metrics
+    metrics_on_run = MlflowClient().get_run(run_id).data.metrics
 
     for i in range(100):
         assert hex(i) in metrics_on_run
@@ -285,18 +282,18 @@ def test_batch_metrics_logger_flush_logs_to_mlflow(start_run):
         metrics_logger.record_metrics({"my_metric": 10}, 5)
 
         # Recorded metrics should not be logged to mlflow run before flushing BatchMetricsLogger
-        metrics_on_run = mlflow.tracking.MlflowClient().get_run(run_id).data.metrics
+        metrics_on_run = MlflowClient().get_run(run_id).data.metrics
         assert "my_metric" not in metrics_on_run
 
         metrics_logger.flush()
 
         # Recorded metric should be logged to mlflow run after flushing BatchMetricsLogger
-        metrics_on_run = mlflow.tracking.MlflowClient().get_run(run_id).data.metrics
+        metrics_on_run = MlflowClient().get_run(run_id).data.metrics
         assert "my_metric" in metrics_on_run
         assert metrics_on_run["my_metric"] == 10
 
 
-def test_batch_metrics_logger_runs_training_and_logging_in_correct_ratio(start_run,):
+def test_batch_metrics_logger_runs_training_and_logging_in_correct_ratio(start_run):
     with mock.patch.object(MlflowClient, "log_batch") as log_batch_mock:
         run_id = mlflow.active_run().info.run_id
         with batch_metrics_logger(run_id) as metrics_logger:
@@ -338,7 +335,7 @@ def test_batch_metrics_logger_runs_training_and_logging_in_correct_ratio(start_r
             log_batch_mock.assert_called_once()
 
 
-def test_batch_metrics_logger_chunks_metrics_when_batch_logging(start_run,):
+def test_batch_metrics_logger_chunks_metrics_when_batch_logging(start_run):
     with mock.patch.object(MlflowClient, "log_batch") as log_batch_mock:
         run_id = mlflow.active_run().info.run_id
         with batch_metrics_logger(run_id) as metrics_logger:
@@ -356,7 +353,7 @@ def test_batch_metrics_logger_chunks_metrics_when_batch_logging(start_run,):
                     assert metric.step == 0
 
 
-def test_batch_metrics_logger_records_time_correctly(start_run,):
+def test_batch_metrics_logger_records_time_correctly(start_run):
     with mock.patch.object(MlflowClient, "log_batch", wraps=lambda *args, **kwargs: time.sleep(1)):
         run_id = mlflow.active_run().info.run_id
         with batch_metrics_logger(run_id) as metrics_logger:
@@ -371,7 +368,7 @@ def test_batch_metrics_logger_records_time_correctly(start_run,):
             assert metrics_logger.total_training_time >= 2
 
 
-def test_batch_metrics_logger_logs_timestamps_as_int_milliseconds(start_run,):
+def test_batch_metrics_logger_logs_timestamps_as_int_milliseconds(start_run):
     with mock.patch.object(MlflowClient, "log_batch") as log_batch_mock, mock.patch(
         "time.time", return_value=123.45678901234567890
     ):
@@ -575,15 +572,14 @@ def test_autologging_is_disabled_returns_expected_values():
 
 
 def test_autologging_disable_restores_behavior():
-    import pandas as pd
-    from sklearn.datasets import load_boston
+    from sklearn.datasets import load_diabetes
     from sklearn.linear_model import LinearRegression
 
     mlflow.sklearn.autolog()
 
-    dataset = load_boston()
-    X = pd.DataFrame(dataset.data[:50, :8], columns=dataset.feature_names[:8])
-    y = dataset.target[:50]
+    X, y = load_diabetes(return_X_y=True, as_frame=True)
+    X = X.iloc[:50, :4]
+    y = y.iloc[:50]
 
     # train a model
     model = LinearRegression()
@@ -754,7 +750,7 @@ _module_version_info_dict_patch = {
 
 
 @pytest.mark.parametrize(
-    "flavor,module_version,expected_result",
+    ("flavor", "module_version", "expected_result"),
     [
         ("fastai", "2.4.1", True),
         ("fastai", "2.3.1", False),
@@ -793,10 +789,12 @@ def test_is_autologging_integration_supported(flavor, module_version, expected_r
 
 
 @pytest.mark.parametrize(
-    "flavor,module_version,expected_result",
+    ("flavor", "module_version", "expected_result"),
     [
-        ("pyspark.ml", "3.1.2.dev0", False),
-        ("pyspark.ml", "3.1.1.dev0", True),
+        ("pyspark.ml", "3.10.1.dev0", False),
+        ("pyspark.ml", "3.3.0.dev0", True),
+        ("pyspark.ml", "3.2.1.dev0", True),
+        ("pyspark.ml", "3.1.2.dev0", True),
         ("pyspark.ml", "3.0.1.dev0", True),
         ("pyspark.ml", "3.0.0.dev0", False),
     ],
@@ -810,7 +808,8 @@ def test_dev_version_pyspark_is_supported_in_databricks(flavor, module_version, 
     with mock.patch(module_name + ".__version__", module_version):
         # In Databricks
         with mock.patch(
-            "mlflow.utils.autologging_utils.versioning.is_in_databricks_runtime", return_value=True,
+            "mlflow.utils.autologging_utils.versioning.is_in_databricks_runtime",
+            return_value=True,
         ) as mock_runtime:
             assert is_flavor_supported_for_associated_package_versions(flavor) == expected_result
             mock_runtime.assert_called()
@@ -906,18 +905,18 @@ def test_get_instance_method_first_arg_value():
         def f4(self, *args, **kwargs):
             pass
 
-    assert 3 == get_instance_method_first_arg_value(Test.f1, [3, 4], {})
-    assert 3 == get_instance_method_first_arg_value(Test.f1, [3], {"cd2": 4})
-    assert 3 == get_instance_method_first_arg_value(Test.f1, [], {"ab1": 3, "cd2": 4})
-    assert 3 == get_instance_method_first_arg_value(Test.f2, [3, 4], {})
-    with pytest.raises(AssertionError):
+    assert get_instance_method_first_arg_value(Test.f1, [3, 4], {}) == 3
+    assert get_instance_method_first_arg_value(Test.f1, [3], {"cd2": 4}) == 3
+    assert get_instance_method_first_arg_value(Test.f1, [], {"ab1": 3, "cd2": 4}) == 3
+    assert get_instance_method_first_arg_value(Test.f2, [3, 4], {}) == 3
+    with pytest.raises(AssertionError, match=""):
         get_instance_method_first_arg_value(Test.f3, [], {"ab1": 3, "cd2": 4})
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match=""):
         get_instance_method_first_arg_value(Test.f4, [], {"ab1": 3, "cd2": 4})
 
 
 def test_get_method_call_arg_value():
     # suppose we call on a method defined like: `def f1(a, b=3, *, c=4, e=5)`
-    assert 2 == get_method_call_arg_value(1, "b", 3, [1, 2], {})
-    assert 3 == get_method_call_arg_value(1, "b", 3, [1], {})
-    assert 2 == get_method_call_arg_value(1, "b", 3, [1], {"b": 2})
+    assert get_method_call_arg_value(1, "b", 3, [1, 2], {}) == 2
+    assert get_method_call_arg_value(1, "b", 3, [1], {}) == 3
+    assert get_method_call_arg_value(1, "b", 3, [1], {"b": 2}) == 2

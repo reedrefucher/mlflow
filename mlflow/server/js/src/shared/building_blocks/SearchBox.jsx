@@ -1,9 +1,7 @@
 import React from 'react';
-import { css } from 'emotion';
 import PropTypes from 'prop-types';
-import { Button } from './Button';
-import { Spacer } from './Spacer';
-import { Input } from './antd/Input';
+import { Spacer } from '../../shared/building_blocks/Spacer';
+import { Input, Button } from '@databricks/design-system';
 import { FormattedMessage } from 'react-intl';
 
 /**
@@ -28,54 +26,47 @@ export class SearchBox extends React.Component {
     onChange: PropTypes.func,
     onSearch: PropTypes.func.isRequired,
     placeholder: PropTypes.string,
-  }
+  };
 
-  getInputValue(value, state) {
-    return value === undefined ? state.searchInput : value;
+  componentDidUpdate(prevProps) {
+    const valueChangedExternally = prevProps.value !== this.props.value;
+
+    if (valueChangedExternally) {
+      this.setState({ searchInput: this.props.value });
+    }
   }
 
   constructor(props) {
     super(props);
-    this.state = { searchInput: '' };
+    this.state = { searchInput: props.value };
 
     this.triggerSearch = this.triggerSearch.bind(this);
     this.triggerChange = this.triggerChange.bind(this);
-    this.getInputValue = this.getInputValue.bind(this);
   }
 
-  triggerChange(e, value, onChangeFunc) {
-    if (onChangeFunc) {
-      onChangeFunc(e);
-    }
-    if (value === undefined) {
-      this.setState({ searchInput: e.target.value });
-    }
+  triggerChange(e) {
+    this.setState({ searchInput: e.target.value });
   }
 
   triggerSearch(e) {
-    const { onSearch, value } = this.props;
-    const input = this.getInputValue(value, this.state);
-    onSearch(e, input);
+    this.props.onSearch(e, this.state.searchInput);
   }
 
   render() {
-    const { placeholder, value, onChange } = this.props;
+    const { placeholder } = this.props;
     return (
       <Spacer direction='horizontal' size='small'>
         <Input
-          value={this.getInputValue(value, this.state)}
-          onChange={(e) => this.triggerChange(e, value, onChange)}
+          value={this.state.searchInput}
+          onChange={this.triggerChange}
+          prefix={<i className='fas fa-search' style={{ fontStyle: 'normal' }} />}
           onPressEnter={this.triggerSearch}
+          onBlur={this.props.onChange}
           placeholder={placeholder}
-          prefix={<i className='fas fa-search' style={{ fontStyle: 'normal' }}/>}
           data-test-id='search-box'
-          className={css(styles.searchBox)}
         />
         <span data-test-id='search-button'>
-          <Button
-            onClick={this.triggerSearch}
-            data-test-id='search-button'
-          >
+          <Button onClick={this.triggerSearch} data-test-id='search-button'>
             <FormattedMessage
               defaultMessage='Search'
               description='String for the search button to search objects in MLflow'
@@ -86,17 +77,3 @@ export class SearchBox extends React.Component {
     );
   }
 }
-
-const styles = {
-  searchBox: {
-    height: '40px',
-    padding: 0,
-    boxSizing: 'border-box',
-    '.ant-input-prefix': {
-      marginLeft: '16px',
-      marginBottom: '2px',
-      marginRight: '12px',
-      left: 0,
-    },
-  },
-};

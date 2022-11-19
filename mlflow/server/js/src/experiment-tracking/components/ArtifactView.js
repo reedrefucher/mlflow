@@ -3,6 +3,7 @@ import { connect } from 'react-redux';
 import PropTypes from 'prop-types';
 import { injectIntl, FormattedMessage } from 'react-intl';
 import {
+  DATA_EXTENSIONS,
   getBasename,
   getExtension,
   IMAGE_EXTENSIONS,
@@ -22,8 +23,7 @@ import {
 import Utils from '../../common/utils/Utils';
 import _ from 'lodash';
 import { getModelVersionPageRoute } from '../../model-registry/routes';
-import { Tooltip } from 'antd';
-import { Typography } from '../../shared/building_blocks/antd/Typography';
+import { Tooltip, Typography } from '@databricks/design-system';
 import './ArtifactView.css';
 import spinner from '../../common/static/mlflow-spinner.png';
 import { getArtifactRootUri, getArtifacts } from '../reducers/Reducers';
@@ -315,6 +315,7 @@ export class ArtifactViewImpl extends Component {
             <ShowArtifactPage
               runUuid={this.props.runUuid}
               path={this.state.activeNodeId}
+              isDirectory={this.activeNodeIsDirectory()}
               size={this.getActiveNodeSize()}
               runTags={this.props.runTags}
               artifactRootUri={this.props.artifactRootUri}
@@ -353,6 +354,8 @@ function ModelVersionInfoSection(props) {
   const { name, version, status, status_message } = modelVersion;
 
   const modelVersionLink = (
+    // Reported during ESLint upgrade
+    // eslint-disable-next-line react/jsx-no-target-blank
     <a
       href={Utils.getIframeCorrectedRoute(getModelVersionPageRoute(name, version))}
       className='model-version-link'
@@ -361,7 +364,7 @@ function ModelVersionInfoSection(props) {
     >
       <span className='model-name'>{name}</span>
       <span>,&nbsp;v{version}&nbsp;</span>
-      <i className='fas fa-external-link-alt' />
+      <i className='fas fa-external-link-o' />
     </a>
   );
 
@@ -429,9 +432,9 @@ const TREEBEARD_STYLE = {
       margin: 0,
       padding: 0,
       backgroundColor: '#FAFAFA',
-      fontSize: '14px',
+      fontSize: '13px',
       maxWidth: '500px',
-      height: '673px',
+      height: '100%',
       overflow: 'scroll',
     },
     node: {
@@ -501,29 +504,43 @@ const TREEBEARD_STYLE = {
 // eslint-disable-next-line react/prop-types
 decorators.Header = ({ style, node }) => {
   let iconType;
+  // Reported during ESLint upgrade
+  // eslint-disable-next-line react/prop-types
   if (node.children) {
     iconType = 'folder';
   } else {
+    // Reported during ESLint upgrade
+    // eslint-disable-next-line react/prop-types
     const extension = getExtension(node.name);
     if (IMAGE_EXTENSIONS.has(extension)) {
-      iconType = 'file-image';
+      iconType = 'file-image-o';
+    } else if (DATA_EXTENSIONS.has(extension)) {
+      iconType = 'file-excel-o';
     } else if (TEXT_EXTENSIONS.has(extension)) {
-      iconType = 'file-code';
+      iconType = 'file-code-o';
     } else {
-      iconType = 'file-alt';
+      iconType = 'file-text-o';
     }
   }
   const iconClass = `fa fa-${iconType}`;
 
   // Add margin-left to the non-directory nodes to align the arrow, icons, and texts.
+  // Reported during ESLint upgrade
+  // eslint-disable-next-line react/prop-types
   const iconStyle = node.children
     ? { marginRight: '5px' }
     : { marginRight: '5px', marginLeft: '19px' };
 
   return (
+    // Reported during ESLint upgrade
+    // eslint-disable-next-line react/prop-types
     <div style={style.base} data-test-id='artifact-tree-node' artifact-name={node.name}>
+      {/* Reported during ESLint upgrade */}
+      {/* eslint-disable-next-line react/prop-types */}
       <div style={style.title}>
         <i className={iconClass} style={iconStyle} />
+        {/* Reported during ESLint upgrade */}
+        {/* eslint-disable-next-line react/prop-types */}
         {node.name}
       </div>
     </div>

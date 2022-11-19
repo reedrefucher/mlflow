@@ -1,4 +1,3 @@
-import time
 from sqlalchemy.orm import relationship, backref
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -10,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     PrimaryKeyConstraint,
     Boolean,
+    Index,
 )
 from mlflow.entities import (
     Experiment,
@@ -26,6 +26,8 @@ from mlflow.entities import (
 )
 from mlflow.entities.lifecycle_stage import LifecycleStage
 from mlflow.store.db.base_sql_model import Base
+from mlflow.utils.mlflow_tags import _get_run_name_from_tags
+from mlflow.utils.time_utils import get_current_time_millis
 
 SourceTypes = [
     SourceType.to_string(SourceType.NOTEBOOK),
@@ -70,6 +72,14 @@ class SqlExperiment(Base):
     Lifecycle Stage of experiment: `String` (limit 32 characters).
                                     Can be either ``active`` (default) or ``deleted``.
     """
+    creation_time = Column(BigInteger(), default=get_current_time_millis)
+    """
+    Creation time of experiment: `BigInteger`.
+    """
+    last_update_time = Column(BigInteger(), default=get_current_time_millis)
+    """
+    Last Update time of experiment: `BigInteger`.
+    """
 
     __table_args__ = (
         CheckConstraint(
@@ -94,6 +104,8 @@ class SqlExperiment(Base):
             artifact_location=self.artifact_location,
             lifecycle_stage=self.lifecycle_stage,
             tags=[t.to_mlflow_entity() for t in self.tags],
+            creation_time=self.creation_time,
+            last_update_time=self.last_update_time,
         )
 
 
@@ -134,13 +146,17 @@ class SqlRun(Base):
     Run Status: `String` (limit 20 characters). Can be one of ``RUNNING``, ``SCHEDULED`` (default),
                 ``FINISHED``, ``FAILED``.
     """
-    start_time = Column(BigInteger, default=int(time.time()))
+    start_time = Column(BigInteger, default=get_current_time_millis)
     """
     Run start time: `BigInteger`. Defaults to current system time.
     """
     end_time = Column(BigInteger, nullable=True, default=None)
     """
     Run end time: `BigInteger`.
+    """
+    deleted_time = Column(BigInteger, nullable=True, default=None)
+    """
+    Run deleted time: `BigInteger`. Timestamp of when run is deleted, defaults to none.
     """
     source_version = Column(String(50))
     """
@@ -182,7 +198,9 @@ class SqlRun(Base):
         # Currently, MLflow Search attributes defined in `SearchUtils.VALID_SEARCH_ATTRIBUTE_KEYS`
         # share the same names as their corresponding `SqlRun` attributes. Therefore, this function
         # returns the same attribute name
-        return mlflow_attribute_name
+        return {"run_name": "name", "run_id": "run_uuid"}.get(
+            mlflow_attribute_name, mlflow_attribute_name
+        )
 
     def to_mlflow_entity(self):
         """
@@ -193,6 +211,7 @@ class SqlRun(Base):
         run_info = RunInfo(
             run_uuid=self.run_uuid,
             run_id=self.run_uuid,
+            run_name=self.name,
             experiment_id=str(self.experiment_id),
             user_id=self.user_id,
             status=self.status,
@@ -202,11 +221,16 @@ class SqlRun(Base):
             artifact_uri=self.artifact_uri,
         )
 
+        tags = [t.to_mlflow_entity() for t in self.tags]
         run_data = RunData(
             metrics=[m.to_mlflow_entity() for m in self.latest_metrics],
             params=[p.to_mlflow_entity() for p in self.params],
-            tags=[t.to_mlflow_entity() for t in self.tags],
+            tags=tags,
         )
+        if not run_info.run_name:
+            run_name = _get_run_name_from_tags(tags)
+            if run_name:
+                run_info._set_run_name(run_name)
 
         return Run(run_info=run_info, run_data=run_data)
 
@@ -256,12 +280,16 @@ class SqlTag(Base):
     """
 
     __tablename__ = "tags"
+    __table_args__ = (
+        PrimaryKeyConstraint("key", "run_uuid", name="tag_pk"),
+        Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
+    )
 
     key = Column(String(250))
     """
     Tag key: `String` (limit 250 characters). *Primary Key* for ``tags`` table.
     """
-    value = Column(String(250), nullable=True)
+    value = Column(String(5000), nullable=True)
     """
     Value associated with tag: `String` (limit 250 characters). Could be *null*.
     """
@@ -273,8 +301,6 @@ class SqlTag(Base):
     """
     SQLAlchemy relationship (many:one) with :py:class:`mlflow.store.dbmodels.models.SqlRun`.
     """
-
-    __table_args__ = (PrimaryKeyConstraint("key", "run_uuid", name="tag_pk"),)
 
     def __repr__(self):
         return "<SqlRunTag({}, {})>".format(self.key, self.value)
@@ -290,6 +316,12 @@ class SqlTag(Base):
 
 class SqlMetric(Base):
     __tablename__ = "metrics"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "key", "timestamp", "step", "run_uuid", "value", "is_nan", name="metric_pk"
+        ),
+        Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
+    )
 
     key = Column(String(250))
     """
@@ -299,7 +331,7 @@ class SqlMetric(Base):
     """
     Metric value: `Float`. Defined as *Non-null* in schema.
     """
-    timestamp = Column(BigInteger, default=lambda: int(time.time() * 1000))
+    timestamp = Column(BigInteger, default=get_current_time_millis)
     """
     Timestamp recorded for this metric entry: `BigInteger`. Part of *Primary Key* for
                                                ``metrics`` table.
@@ -322,12 +354,6 @@ class SqlMetric(Base):
     SQLAlchemy relationship (many:one) with :py:class:`mlflow.store.dbmodels.models.SqlRun`.
     """
 
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "key", "timestamp", "step", "run_uuid", "value", "is_nan", name="metric_pk"
-        ),
-    )
-
     def __repr__(self):
         return "<SqlMetric({}, {}, {}, {})>".format(self.key, self.value, self.timestamp, self.step)
 
@@ -347,6 +373,10 @@ class SqlMetric(Base):
 
 class SqlLatestMetric(Base):
     __tablename__ = "latest_metrics"
+    __table_args__ = (
+        PrimaryKeyConstraint("key", "run_uuid", name="latest_metric_pk"),
+        Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
+    )
 
     key = Column(String(250))
     """
@@ -356,7 +386,7 @@ class SqlLatestMetric(Base):
     """
     Metric value: `Float`. Defined as *Non-null* in schema.
     """
-    timestamp = Column(BigInteger, default=lambda: int(time.time() * 1000))
+    timestamp = Column(BigInteger, default=get_current_time_millis)
     """
     Timestamp recorded for this metric entry: `BigInteger`. Part of *Primary Key* for
                                                ``latest_metrics`` table.
@@ -379,8 +409,6 @@ class SqlLatestMetric(Base):
     SQLAlchemy relationship (many:one) with :py:class:`mlflow.store.dbmodels.models.SqlRun`.
     """
 
-    __table_args__ = (PrimaryKeyConstraint("key", "run_uuid", name="latest_metric_pk"),)
-
     def __repr__(self):
         return "<SqlLatestMetric({}, {}, {}, {})>".format(
             self.key, self.value, self.timestamp, self.step
@@ -402,14 +430,18 @@ class SqlLatestMetric(Base):
 
 class SqlParam(Base):
     __tablename__ = "params"
+    __table_args__ = (
+        PrimaryKeyConstraint("key", "run_uuid", name="param_pk"),
+        Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
+    )
 
     key = Column(String(250))
     """
     Param key: `String` (limit 250 characters). Part of *Primary Key* for ``params`` table.
     """
-    value = Column(String(250), nullable=False)
+    value = Column(String(500), nullable=False)
     """
-    Param value: `String` (limit 250 characters). Defined as *Non-null* in schema.
+    Param value: `String` (limit 500 characters). Defined as *Non-null* in schema.
     """
     run_uuid = Column(String(32), ForeignKey("runs.run_uuid"))
     """
@@ -420,8 +452,6 @@ class SqlParam(Base):
     """
     SQLAlchemy relationship (many:one) with :py:class:`mlflow.store.dbmodels.models.SqlRun`.
     """
-
-    __table_args__ = (PrimaryKeyConstraint("key", "run_uuid", name="param_pk"),)
 
     def __repr__(self):
         return "<SqlParam({}, {})>".format(self.key, self.value)

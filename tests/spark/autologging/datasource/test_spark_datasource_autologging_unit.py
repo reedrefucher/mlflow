@@ -22,7 +22,6 @@ def mock_get_current_listener():
         yield get_listener_patch
 
 
-@pytest.mark.large
 @pytest.mark.usefixtures("spark_session")
 def test_autolog_call_idempotent():
     mlflow.spark.autolog()
@@ -31,7 +30,6 @@ def test_autolog_call_idempotent():
     assert _get_current_listener() == listener
 
 
-@pytest.mark.large
 def test_subscriber_methods():
     # Test that PythonSubscriber satisfies the contract expected by the underlying Scala trait
     # it implements (MlflowAutologEventSubscriber)
@@ -42,7 +40,6 @@ def test_subscriber_methods():
     assert PythonSubscriber().replId() != subscriber.replId()
 
 
-@pytest.mark.large
 def test_enabling_autologging_throws_for_wrong_spark_version(
     spark_session, mock_get_current_listener
 ):
@@ -50,6 +47,7 @@ def test_enabling_autologging_throws_for_wrong_spark_version(
     with mock.patch("mlflow._spark_autologging._get_spark_major_version") as get_version_mock:
         get_version_mock.return_value = 2
 
-        with pytest.raises(MlflowException) as exc:
+        with pytest.raises(
+            MlflowException, match="Spark autologging unsupported for Spark versions < 3"
+        ):
             mlflow.spark.autolog()
-        assert "Spark autologging unsupported for Spark versions < 3" in exc.value.message

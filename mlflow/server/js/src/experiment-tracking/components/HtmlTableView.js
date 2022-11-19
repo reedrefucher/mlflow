@@ -1,7 +1,7 @@
 import React, { Component } from 'react';
 import PropTypes from 'prop-types';
+import { Table } from '@databricks/design-system';
 import './HtmlTableView.css';
-import { Table } from 'antd';
 
 export class HtmlTableView extends Component {
   static propTypes = {
@@ -9,6 +9,7 @@ export class HtmlTableView extends Component {
     values: PropTypes.array.isRequired,
     styles: PropTypes.object,
     testId: PropTypes.string,
+    scroll: PropTypes.object,
   };
 
   render() {
@@ -20,6 +21,7 @@ export class HtmlTableView extends Component {
         data-test-id={this.props.testId}
         dataSource={this.props.values}
         columns={this.props.columns}
+        scroll={this.props.scroll}
         size='middle'
         pagination={false}
         style={styles}

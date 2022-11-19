@@ -1,9 +1,6 @@
-import React from 'react';
-import { shallow, mount } from 'enzyme';
+import { shallow } from 'enzyme';
 import ExperimentViewUtil, { TreeNode } from './ExperimentViewUtil';
 import { getModelVersionPageRoute } from '../../model-registry/routes';
-import { BrowserRouter } from 'react-router-dom';
-import { SEARCH_MAX_RESULTS } from '../actions';
 import {
   ATTRIBUTE_COLUMN_LABELS,
   COLUMN_TYPES,
@@ -24,35 +21,6 @@ describe('ExperimentViewUtil', () => {
     const component = ExperimentViewUtil.getCheckboxForRow(true, () => {}, 'div');
     const wrapper = shallow(component);
     expect(wrapper.length).toBe(1);
-  });
-
-  test('getRunInfoCellsForRow returns a row containing userid, start time, and status', () => {
-    const runInfo = {
-      user_id: 'user1',
-      start_time: new Date('2020-01-02').getTime(),
-      status: 'FINISHED',
-    };
-    const runInfoCells = ExperimentViewUtil.getRunInfoCellsForRow(
-      runInfo,
-      {},
-      false,
-      'div',
-      () => {},
-      [],
-    );
-    const renderedCells = runInfoCells.map((c) => mount(<BrowserRouter>{c}</BrowserRouter>));
-    expect(renderedCells[0].find('.run-table-container').filter({ title: 'FINISHED' }).length).toBe(
-      1,
-    );
-    const allText = renderedCells.map((c) => c.text()).join();
-    expect(allText).toContain('user1');
-    // The start_time is localized, so it may be anywhere from -12 to +14 hours, based on the
-    // client's timezone.
-    expect(
-      allText.includes('2020-01-01') ||
-        allText.includes('2020-01-02') ||
-        allText.includes('2020-01-03'),
-    ).toBeTruthy();
   });
 
   test('clicking on getRunMetadataHeaderCells sorts column if column is sortable', () => {
@@ -116,22 +84,25 @@ describe('ExperimentViewUtil', () => {
     expect(ranges.foo.max).toBe(2);
   });
 
-  test('disable loadMoreButton when numRunsFromLatestSearch is not null and less than SEARCH_MAX_RESULTS', () => {
+  test('disable loadMoreButton when numRunsFromLatestSearch is not null and there is no nextPageToken', () => {
     expect(
       ExperimentViewUtil.disableLoadMoreButton({
         numRunsFromLatestSearch: null,
+        nextPageToken: null,
       }),
     ).toBe(false);
 
     expect(
       ExperimentViewUtil.disableLoadMoreButton({
-        numRunsFromLatestSearch: SEARCH_MAX_RESULTS - 1,
+        numRunsFromLatestSearch: 50,
+        nextPageToken: null,
       }),
     ).toBe(true);
 
     expect(
       ExperimentViewUtil.disableLoadMoreButton({
-        numRunsFromLatestSearch: SEARCH_MAX_RESULTS,
+        numRunsFromLatestSearch: 50,
+        nextPageToken: 'There is a page token',
       }),
     ).toBe(false);
   });
@@ -140,12 +111,9 @@ describe('ExperimentViewUtil', () => {
     const modelName = 'model1';
     const model_versions = [{ name: modelName, version: 2 }];
     const linkedModelDiv = shallow(ExperimentViewUtil.getLinkedModelCell(model_versions));
-    expect(
-      linkedModelDiv
-        .find('.model-version-link')
-        .at(0)
-        .props().href,
-    ).toContain(getModelVersionPageRoute(model_versions[0].name, model_versions[0].version));
+    expect(linkedModelDiv.find('.model-version-link').at(0).props().href).toContain(
+      getModelVersionPageRoute(model_versions[0].name, model_versions[0].version),
+    );
   });
 
   test('should not nest children if nestChildren is false', () => {
@@ -175,8 +143,9 @@ describe('ExperimentViewUtil', () => {
         idx: 1,
         isParent: true,
         runId: 2,
+        level: 0,
       },
-      { hasExpander: false, idx: 0, isParent: false },
+      { hasExpander: false, idx: 0, isParent: false, level: 1 },
     ]);
 
     expect(
@@ -453,6 +422,67 @@ describe('ExperimentViewUtil', () => {
         preSwitchCategorizedUncheckedKeys,
         postSwitchCategorizedUncheckedKeys,
         currCategorizedUncheckedKeys,
+      }),
+    ).toEqual(expectedCategorizedUncheckedKeys);
+  });
+
+  test('getNestedRowRenderMetadata ensures the UI renders properly when parent runs have been deleted and are referenced by their children', () => {
+    const createRun = (runId) =>
+      RunInfo.fromJs({
+        run_uuid: runId,
+        experiment_id: '3',
+        status: 'FINISHED',
+        start_time: 1,
+        end_time: 1,
+        artifact_uri: 'dummypath',
+        lifecycle_stage: 'active',
+      });
+    const runInfos = [createRun('run-id1'), createRun('run-id2'), createRun('run-id3')];
+    const createTag = (parentId) => ({
+      tag1: '1',
+      tag2: '1',
+      tag3: '1',
+      [Utils.runNameTag]: 'runname1',
+      [Utils.gitCommitTag]: 'gitcommit1',
+      'mlflow.parentRunId': parentId,
+    });
+    const tagsList = [
+      createTag(),
+      createTag({
+        value: 'run-id1',
+      }),
+      createTag({
+        value: 'run-id2',
+      }),
+    ];
+    const runsExpanded = { 'run-id1': true, 'run-id2': true, 'run-id3': true };
+    const expectedCategorizedUncheckedKeys = [
+      {
+        childrenIds: ['run-id2'],
+        expanderOpen: true,
+        hasExpander: true,
+        idx: 0,
+        isParent: true,
+        runId: 'run-id1',
+        level: 0,
+      },
+      {
+        childrenIds: ['run-id3'],
+        expanderOpen: true,
+        hasExpander: true,
+        idx: 1,
+        isParent: true,
+        runId: 'run-id2',
+        level: 1,
+      },
+      { hasExpander: false, idx: 2, isParent: false, level: 2 },
+    ];
+
+    expect(
+      ExperimentViewUtil.getNestedRowRenderMetadata({
+        runInfos,
+        tagsList,
+        runsExpanded,
       }),
     ).toEqual(expectedCategorizedUncheckedKeys);
   });

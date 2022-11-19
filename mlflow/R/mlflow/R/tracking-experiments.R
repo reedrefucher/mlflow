@@ -28,29 +28,51 @@ mlflow_create_experiment <- function(name, artifact_location = NULL, client = NU
   response$experiment_id
 }
 
-#' List Experiments
+#' Search Experiments
 #'
-#' Gets a list of all experiments.
+#' Search for experiments that satisfy specified criteria.
 #'
-#' @param view_type Qualifier for type of experiments to be returned. Defaults to `ACTIVE_ONLY`.
+#' @param filter A filter expression used to identify specific experiments.
+#'   The syntax is a subset of SQL which allows only ANDing together binary operations.
+#'   Examples: "attribute.name = 'MyExperiment'", "tags.problem_type = 'iris_regression'"
+#' @param experiment_view_type Experiment view type. Only experiments matching this view type are
+#'   returned.
+#' @param order_by List of properties to order by. Example: "attribute.name".
+#' @param max_results Maximum number of experiments to retrieve.
+#' @param page_token Pagination token to go to the next page based on a
+#'   previous query.
 #' @template roxlate-client
 #' @export
-mlflow_list_experiments <- function(view_type = c("ACTIVE_ONLY", "DELETED_ONLY", "ALL"), client = NULL) {
+mlflow_search_experiments <- function(filter = NULL,
+                                      experiment_view_type = c(
+                                        "ACTIVE_ONLY", "DELETED_ONLY", "ALL"
+                                      ),
+                                      max_results = 1000,
+                                      order_by = list(),
+                                      page_token = NULL,
+                                      client = NULL) {
   client <- resolve_client(client)
-  view_type <- match.arg(view_type)
-  response <-   mlflow_rest(
-    "experiments", "list",
-    client = client, verb = "GET",
-    query = list(view_type = view_type)
-  )
+  experiment_view_type <- match.arg(experiment_view_type)
+  response <- mlflow_rest("experiments", "search", client = client, verb = "POST", data = list(
+    filter = filter,
+    view_type = experiment_view_type,
+    max_results = max_results,
+    order_by = cast_string_list(order_by),
+    page_token = page_token
+  ))
 
   # Return `NULL` if no experiments
   if (!length(response)) return(NULL)
-  purrr::map(response$experiments, function(x) {
+  experiments <- purrr::map(response$experiments, function(x) {
     x$tags <- parse_run_data(x$tags)
     tibble::as_tibble(x)
   }) %>%
     do.call(rbind, .)
+
+  return(list(
+    experiments=experiments,
+    next_page_token = response$next_page_token
+  ))
 }
 
 #' Set Experiment Tag

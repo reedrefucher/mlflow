@@ -5,8 +5,10 @@ import itertools
 import pickle
 import os
 import pytest
+from pathlib import Path
 
 import mlflow
+from mlflow.exceptions import MlflowException
 from mlflow.store.db.db_types import DATABASE_ENGINES
 from mlflow.store.tracking.file_store import FileStore
 from mlflow.store.tracking.rest_store import RestStore
@@ -14,6 +16,8 @@ from mlflow.store.tracking.sqlalchemy_store import SqlAlchemyStore
 from mlflow.tracking.registry import UnsupportedModelRegistryStoreURIException
 from mlflow.tracking._tracking_service.registry import TrackingStoreRegistry
 from mlflow.tracking._tracking_service.utils import (
+    set_tracking_uri,
+    get_tracking_uri,
     _get_store,
     _resolve_tracking_uri,
     _TRACKING_INSECURE_TLS_ENV_VAR,
@@ -28,7 +32,7 @@ from mlflow.tracking._tracking_service.utils import (
 # Disable mocking tracking URI here, as we want to test setting the tracking URI via
 # environment variable. See
 # http://doc.pytest.org/en/latest/skipping.html#skip-all-test-functions-of-a-class-or-module
-# and https://github.com/mlflow/mlflow/blob/master/CONTRIBUTING.rst#writing-python-tests
+# and https://github.com/mlflow/mlflow/blob/master/CONTRIBUTING.md#writing-python-tests
 # for more information.
 pytestmark = pytest.mark.notrackingurimock
 
@@ -132,10 +136,10 @@ def test_get_store_sqlalchemy_store(tmp_wkdir, db_type):
     with mock.patch.dict(os.environ, env), patch_create_engine as mock_create_engine, mock.patch(
         "mlflow.store.db.utils._verify_schema"
     ), mock.patch("mlflow.store.db.utils._initialize_tables"), mock.patch(
-        # In sqlalchemy 1.4.0, `SqlAlchemyStore.list_experiments`, which is called when fetching
+        # In sqlalchemy 1.4.0, `SqlAlchemyStore.search_experiments`, which is called when fetching
         # the store, results in an error when called with a mocked sqlalchemy engine.
-        # Accordingly, we mock `SqlAlchemyStore.list_experiments`
-        "mlflow.store.tracking.sqlalchemy_store.SqlAlchemyStore.list_experiments",
+        # Accordingly, we mock `SqlAlchemyStore.search_experiments`
+        "mlflow.store.tracking.sqlalchemy_store.SqlAlchemyStore.search_experiments",
         return_value=[],
     ):
         store = _get_store()
@@ -156,10 +160,10 @@ def test_get_store_sqlalchemy_store_with_artifact_uri(tmp_wkdir, db_type):
     with mock.patch.dict(os.environ, env), patch_create_engine as mock_create_engine, mock.patch(
         "mlflow.store.db.utils._verify_schema"
     ), mock.patch("mlflow.store.db.utils._initialize_tables"), mock.patch(
-        # In sqlalchemy 1.4.0, `SqlAlchemyStore.list_experiments`, which is called when fetching
+        # In sqlalchemy 1.4.0, `SqlAlchemyStore.search_experiments`, which is called when fetching
         # the store, results in an error when called with a mocked sqlalchemy engine.
-        # Accordingly, we mock `SqlAlchemyStore.list_experiments`
-        "mlflow.store.tracking.sqlalchemy_store.SqlAlchemyStore.list_experiments",
+        # Accordingly, we mock `SqlAlchemyStore.search_experiments`
+        "mlflow.store.tracking.sqlalchemy_store.SqlAlchemyStore.search_experiments",
         return_value=[],
     ):
         store = _get_store(artifact_uri=artifact_uri)
@@ -192,9 +196,8 @@ def test_get_store_databricks_profile():
     with mock.patch.dict(os.environ, env):
         store = _get_store()
         assert isinstance(store, RestStore)
-        with pytest.raises(Exception) as e_info:
+        with pytest.raises(MlflowException, match="mycoolprofile"):
             store.get_host_creds()
-        assert "mycoolprofile" in str(e_info.value)
 
 
 def test_get_store_caches_on_store_uri_and_artifact_uri(tmpdir):
@@ -226,7 +229,7 @@ def test_standard_store_registry_with_mocked_entrypoint():
     with mock.patch("entrypoints.get_group_all", return_value=[mock_entrypoint]):
         # Entrypoints are registered at import time, so we need to reload the
         # module to register the entrypoint given by the mocked
-        # extrypoints.get_group_all
+        # entrypoints.get_group_all
         reload(mlflow.tracking._tracking_service.utils)
 
         expected_standard_registry = {
@@ -246,14 +249,12 @@ def test_standard_store_registry_with_mocked_entrypoint():
         )
 
 
-@pytest.mark.large
 def test_standard_store_registry_with_installed_plugin(tmp_wkdir):
     """This test requires the package in tests/resources/mlflow-test-plugin to be installed"""
 
     reload(mlflow.tracking._tracking_service.utils)
     assert (
-        "file-plugin"
-        in mlflow.tracking._tracking_service.utils._tracking_store_registry._registry.keys()
+        "file-plugin" in mlflow.tracking._tracking_service.utils._tracking_store_registry._registry
     )
 
     from mlflow_test_plugin.file_store import PluginFileStore
@@ -323,7 +324,10 @@ def test_get_store_for_unregistered_scheme():
 
     tracking_store = TrackingStoreRegistry()
 
-    with pytest.raises(UnsupportedModelRegistryStoreURIException):
+    with pytest.raises(
+        UnsupportedModelRegistryStoreURIException,
+        match="Model registry functionality is unavailable",
+    ):
         tracking_store.get_store("unknown-scheme://")
 
 
@@ -355,3 +359,14 @@ def test_store_object_can_be_serialized_by_pickle(tmpdir):
     pickle.dump(_get_store("https://example.com"), io.BytesIO())
     # pickle.dump(_get_store(f"sqlite:///{tmpdir.strpath}/mlflow.db"), io.BytesIO())
     # This throws `AttributeError: Can't pickle local object 'create_engine.<locals>.connect'`
+
+
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "relative"])
+def test_set_tracking_uri_with_path(tmp_path, monkeypatch, absolute):
+    monkeypatch.chdir(tmp_path)
+    path = Path("foo/bar")
+    if absolute:
+        path = tmp_path / path
+    with mock.patch("mlflow.tracking._tracking_service.utils._tracking_uri", None):
+        set_tracking_uri(path)
+        assert get_tracking_uri() == path.absolute().resolve().as_uri()

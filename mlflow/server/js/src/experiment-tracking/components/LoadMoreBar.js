@@ -9,7 +9,7 @@
 */
 
 import React from 'react';
-import { Button, Icon, Tooltip } from 'antd';
+import { Tooltip, Button, WithDesignSystemThemeHoc, SyncIcon } from '@databricks/design-system';
 import PropTypes from 'prop-types';
 import { injectIntl, FormattedMessage } from 'react-intl';
 
@@ -21,10 +21,11 @@ export class LoadMoreBarImpl extends React.PureComponent {
     disableButton: PropTypes.bool,
     nestChildren: PropTypes.bool,
     intl: PropTypes.shape({ formatMessage: PropTypes.func.isRequired }).isRequired,
+    designSystemThemeApi: PropTypes.any.isRequired,
   };
 
   renderButton() {
-    const { disableButton, onLoadMore, nestChildren, intl } = this.props;
+    const { disableButton, onLoadMore, nestChildren, intl, designSystemThemeApi } = this.props;
     const loadMoreButton = (
       <Button
         className='load-more-button'
@@ -70,7 +71,13 @@ export class LoadMoreBarImpl extends React.PureComponent {
                 'Tooltip text for load more button explaining the runs are nested under their parent experiment run',
             })}
           >
-            <i className='fas fa-info-circle' style={styles.nestedTooltip} />
+            <i
+              className='fas fa-info-circle'
+              css={{
+                marginLeft: designSystemThemeApi.theme.spacing.sm,
+                color: designSystemThemeApi.theme.colors.actionPrimaryBackgroundDefault,
+              }}
+            />
           </Tooltip>
         </div>
       );
@@ -85,7 +92,7 @@ export class LoadMoreBarImpl extends React.PureComponent {
       <div className='load-more-row' style={{ ...styles.loadMoreRows, ...style }}>
         {loadingMore ? (
           <div className='loading-more-wrapper' style={styles.loadingMoreWrapper}>
-            <Icon type='sync' spin style={styles.loadingMoreIcon} />
+            <SyncIcon spin style={styles.loadingMoreIcon} />
           </div>
         ) : (
           this.renderButton()
@@ -113,10 +120,6 @@ const styles = {
     paddingLeft: 16,
     paddingRight: 16,
   },
-  nestedTooltip: {
-    color: '#2374BB', // matches antd primary button colour
-    marginLeft: 8,
-  },
 };
 
-export const LoadMoreBar = injectIntl(LoadMoreBarImpl);
+export const LoadMoreBar = WithDesignSystemThemeHoc(injectIntl(LoadMoreBarImpl));

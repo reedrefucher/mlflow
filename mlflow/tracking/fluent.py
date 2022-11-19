@@ -5,13 +5,12 @@ MLflow run. This module is exposed to users at the top-level :py:mod:`mlflow` mo
 import os
 
 import atexit
-import time
 import logging
 import inspect
-from packaging.version import Version
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
-from mlflow.entities import Experiment, Run, RunInfo, RunStatus, Param, RunTag, Metric, ViewType
+from mlflow.entities import Experiment, Run, RunStatus, Param, RunTag, Metric, ViewType
 from mlflow.entities.lifecycle_stage import LifecycleStage
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
@@ -21,32 +20,42 @@ from mlflow.protos.databricks_pb2 import (
 from mlflow.tracking.client import MlflowClient
 from mlflow.tracking import artifact_utils, _get_store
 from mlflow.tracking.context import registry as context_registry
+from mlflow.tracking.default_experiment import registry as default_experiment_registry
 from mlflow.store.tracking import SEARCH_MAX_RESULTS_DEFAULT
-from mlflow.utils import env
+from mlflow.utils import env, get_results_from_paginated_fn
 from mlflow.utils.autologging_utils import (
     is_testing,
     autologging_integration,
     AUTOLOGGING_INTEGRATIONS,
     autologging_is_disabled,
+    AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED,
 )
-from mlflow.utils.databricks_utils import is_in_databricks_notebook, get_notebook_id
 from mlflow.utils.import_hooks import register_post_import_hook
-from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID, MLFLOW_RUN_NAME
-from mlflow.utils.validation import _validate_run_id
+from mlflow.utils.mlflow_tags import (
+    MLFLOW_PARENT_RUN_ID,
+    MLFLOW_RUN_NAME,
+    MLFLOW_RUN_NOTE,
+    MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME,
+    MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER,
+)
+from mlflow.utils.validation import _validate_run_id, _validate_experiment_id_type
+from mlflow.utils.time_utils import get_current_time_millis
+
 
 if TYPE_CHECKING:
     import pandas  # pylint: disable=unused-import
     import matplotlib  # pylint: disable=unused-import
+    import matplotlib.figure
     import plotly  # pylint: disable=unused-import
     import numpy  # pylint: disable=unused-import
     import PIL  # pylint: disable=unused-import
-
 
 _EXPERIMENT_ID_ENV_VAR = "MLFLOW_EXPERIMENT_ID"
 _EXPERIMENT_NAME_ENV_VAR = "MLFLOW_EXPERIMENT_NAME"
 _RUN_ID_ENV_VAR = "MLFLOW_RUN_ID"
 _active_run_stack = []
 _active_experiment_id = None
+_last_active_run_id = None
 
 SEARCH_MAX_RESULTS_PANDAS = 100000
 NUM_RUNS_PER_PAGE_PANDAS = 10000
@@ -54,7 +63,7 @@ NUM_RUNS_PER_PAGE_PANDAS = 10000
 _logger = logging.getLogger(__name__)
 
 
-def set_experiment(experiment_name: str = None, experiment_id: str = None) -> None:
+def set_experiment(experiment_name: str = None, experiment_id: str = None) -> Experiment:
     """
     Set the given experiment as the active experiment. The experiment must either be specified by
     name via `experiment_name` or by ID via `experiment_id`. The experiment name and ID cannot
@@ -73,11 +82,10 @@ def set_experiment(experiment_name: str = None, experiment_id: str = None) -> No
 
         import mlflow
 
-        # Set an experiment name, which must be unique and case sensitive.
-        mlflow.set_experiment("Social NLP Experiments")
+        # Set an experiment name, which must be unique and case-sensitive.
+        experiment = mlflow.set_experiment("Social NLP Experiments")
 
         # Get Experiment Details
-        experiment = mlflow.get_experiment_by_name("Social NLP Experiments")
         print("Experiment_id: {}".format(experiment.experiment_id))
         print("Artifact Location: {}".format(experiment.artifact_location))
         print("Tags: {}".format(experiment.tags))
@@ -123,9 +131,9 @@ def set_experiment(experiment_name: str = None, experiment_id: str = None) -> No
     if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
         raise MlflowException(
             message=(
-                "Cannot set a deleted experiment '%s' as the active experiment."
-                " You can restore the experiment, or permanently delete the "
-                " experiment to create a new one." % experiment.name
+                "Cannot set a deleted experiment '%s' as the active experiment. "
+                "You can restore the experiment, or permanently delete the "
+                "experiment to create a new one." % experiment.name
             ),
             error_code=INVALID_PARAMETER_VALUE,
         )
@@ -133,6 +141,16 @@ def set_experiment(experiment_name: str = None, experiment_id: str = None) -> No
     global _active_experiment_id
     _active_experiment_id = experiment.experiment_id
     return experiment
+
+
+def _set_experiment_primary_metric(
+    experiment_id: str, primary_metric: str, greater_is_better: bool
+):
+    client = MlflowClient()
+    client.set_experiment_tag(experiment_id, MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME, primary_metric)
+    client.set_experiment_tag(
+        experiment_id, MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER, str(greater_is_better)
+    )
 
 
 class ActiveRun(Run):  # pylint: disable=W0223
@@ -156,6 +174,7 @@ def start_run(
     run_name: Optional[str] = None,
     nested: bool = False,
     tags: Optional[Dict[str, Any]] = None,
+    description: Optional[str] = None,
 ) -> ActiveRun:
     """
     Start a new MLflow run, setting it as the active run under which metrics and parameters
@@ -181,12 +200,16 @@ def start_run(
                           activated using ``set_experiment``, ``MLFLOW_EXPERIMENT_NAME``
                           environment variable, ``MLFLOW_EXPERIMENT_ID`` environment variable,
                           or the default experiment as defined by the tracking server.
-    :param run_name: Name of new run (stored as a ``mlflow.runName`` tag).
-                     Used only when ``run_id`` is unspecified.
+    :param run_name: Name of new run.
+                     Used only when ``run_id`` is unspecified. If a new run is created and
+                     ``run_name`` is not specified, a unique name will be generated for the run.
     :param nested: Controls whether run is nested in parent run. ``True`` creates a nested run.
     :param tags: An optional dictionary of string keys and values to set as tags on the run.
                  If a run is being resumed, these tags are set on the resumed run. If a new run is
                  being created, these tags are set on the new run.
+    :param description: An optional string that populates the description box of the run.
+                        If a run is being resumed, the description is set on the resumed run.
+                        If a new run is being created, the description is set on the new run.
     :return: :py:class:`mlflow.ActiveRun` object that acts as a context manager wrapping
              the run's state.
 
@@ -196,30 +219,51 @@ def start_run(
         import mlflow
 
         # Create nested runs
-        with mlflow.start_run(run_name='PARENT_RUN') as parent_run:
+        experiment_id = mlflow.create_experiment("experiment1")
+        with mlflow.start_run(
+            run_name="PARENT_RUN",
+            experiment_id=experiment_id,
+            tags={"version": "v1", "priority": "P1"},
+            description="parent",
+        ) as parent_run:
             mlflow.log_param("parent", "yes")
-            with mlflow.start_run(run_name='CHILD_RUN', nested=True) as child_run:
+            with mlflow.start_run(
+                run_name="CHILD_RUN",
+                experiment_id=experiment_id,
+                description="child",
+                nested=True,
+            ) as child_run:
                 mlflow.log_param("child", "yes")
 
-        print("parent run_id: {}".format(parent_run.info.run_id))
-        print("child run_id : {}".format(child_run.info.run_id))
+        print("parent run:")
+
+        print("run_id: {}".format(parent_run.info.run_id))
+        print("description: {}".format(parent_run.data.tags.get("mlflow.note.content")))
+        print("version tag value: {}".format(parent_run.data.tags.get("version")))
+        print("priority tag value: {}".format(parent_run.data.tags.get("priority")))
         print("--")
 
         # Search all child runs with a parent id
         query = "tags.mlflow.parentRunId = '{}'".format(parent_run.info.run_id)
-        results = mlflow.search_runs(filter_string=query)
+        results = mlflow.search_runs(experiment_ids=[experiment_id], filter_string=query)
+        print("child runs:")
         print(results[["run_id", "params.child", "tags.mlflow.runName"]])
 
     .. code-block:: text
         :caption: Output
 
-        parent run_id: 5ec0e7ae18f54c2694ffb48c2fccf25c
-        child run_id : 78b3b0d264b44cd29e8dc389749bb4be
+        parent run:
+        run_id: 8979459433a24a52ab3be87a229a9cdf
+        description: starting a parent for experiment 7
+        version tag value: v1
+        priority tag value: P1
         --
+        child runs:
                                      run_id params.child tags.mlflow.runName
-        0  78b3b0d264b44cd29e8dc389749bb4be          yes           CHILD_RUN
+        0  7d175204675e40328e46d9a6a5a7ee6a          yes           CHILD_RUN
     """
     global _active_run_stack
+    _validate_experiment_id_type(experiment_id)
     # back compat for int experiment_id
     experiment_id = str(experiment_id) if isinstance(experiment_id, int) else experiment_id
     if len(_active_run_stack) > 0 and not nested:
@@ -262,8 +306,18 @@ def start_run(
         # Use previous end_time because a value is required for update_run_info
         end_time = active_run_obj.info.end_time
         _get_store().update_run_info(
-            existing_run_id, run_status=RunStatus.RUNNING, end_time=end_time
+            existing_run_id, run_status=RunStatus.RUNNING, end_time=end_time, run_name=None
         )
+        tags = tags or {}
+        if description:
+            if MLFLOW_RUN_NOTE in tags:
+                raise MlflowException(
+                    f"Description is already set via the tag {MLFLOW_RUN_NOTE} in tags."
+                    f"Remove the key {MLFLOW_RUN_NOTE} from the tags or omit the description.",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+            tags[MLFLOW_RUN_NOTE] = description
+
         if tags:
             client.log_batch(
                 run_id=existing_run_id,
@@ -278,15 +332,25 @@ def start_run(
 
         exp_id_for_run = experiment_id if experiment_id is not None else _get_experiment_id()
 
-        user_specified_tags = tags or {}
+        user_specified_tags = deepcopy(tags) or {}
+        if description:
+            if MLFLOW_RUN_NOTE in user_specified_tags:
+                raise MlflowException(
+                    f"Description is already set via the tag {MLFLOW_RUN_NOTE} in tags."
+                    f"Remove the key {MLFLOW_RUN_NOTE} from the tags or omit the description.",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+            user_specified_tags[MLFLOW_RUN_NOTE] = description
         if parent_run_id is not None:
             user_specified_tags[MLFLOW_PARENT_RUN_ID] = parent_run_id
-        if run_name is not None:
+        if run_name:
             user_specified_tags[MLFLOW_RUN_NAME] = run_name
 
-        tags = context_registry.resolve_tags(user_specified_tags)
+        resolved_tags = context_registry.resolve_tags(user_specified_tags)
 
-        active_run_obj = client.create_run(experiment_id=exp_id_for_run, tags=tags)
+        active_run_obj = client.create_run(
+            experiment_id=exp_id_for_run, tags=resolved_tags, run_name=run_name
+        )
 
     _active_run_stack.append(ActiveRun(active_run_obj))
     return _active_run_stack[-1]
@@ -322,12 +386,13 @@ def end_run(status: str = RunStatus.to_string(RunStatus.FINISHED)) -> None:
         --
         Active run: None
     """
-    global _active_run_stack
+    global _active_run_stack, _last_active_run_id
     if len(_active_run_stack) > 0:
         # Clear out the global existing run environment variable as well.
         env.unset_variable(_RUN_ID_ENV_VAR)
         run = _active_run_stack.pop()
         MlflowClient().set_terminated(run.info.run_id, status)
+        _last_active_run_id = run.info.run_id
 
 
 atexit.register(end_run)
@@ -338,7 +403,7 @@ def active_run() -> Optional[ActiveRun]:
 
     **Note**: You cannot access currently-active run attributes
     (parameters, metrics, etc.) through the run returned by ``mlflow.active_run``. In order
-    to access such attributes, use the :py:class:`mlflow.tracking.MlflowClient` as follows:
+    to access such attributes, use the :py:class:`mlflow.client.MlflowClient` as follows:
 
     .. code-block:: python
         :caption: Example
@@ -356,6 +421,64 @@ def active_run() -> Optional[ActiveRun]:
         Active run_id: 6f252757005748708cd3aad75d1ff462
     """
     return _active_run_stack[-1] if len(_active_run_stack) > 0 else None
+
+
+def last_active_run() -> Optional[Run]:
+    """
+    Gets the most recent active run.
+
+    Examples:
+
+    .. code-block:: python
+        :caption: To retrieve the most recent autologged run:
+
+        import mlflow
+
+        from sklearn.model_selection import train_test_split
+        from sklearn.datasets import load_diabetes
+        from sklearn.ensemble import RandomForestRegressor
+
+        mlflow.autolog()
+
+        db = load_diabetes()
+        X_train, X_test, y_train, y_test = train_test_split(db.data, db.target)
+
+        # Create and train models.
+        rf = RandomForestRegressor(n_estimators = 100, max_depth = 6, max_features = 3)
+        rf.fit(X_train, y_train)
+
+        # Use the model to make predictions on the test dataset.
+        predictions = rf.predict(X_test)
+        autolog_run = mlflow.last_active_run()
+
+    .. code-block:: python
+        :caption: To get the most recently active run that ended:
+
+        import mlflow
+
+        mlflow.start_run()
+        mlflow.end_run()
+        run = mlflow.last_active_run()
+
+    .. code-block:: python
+        :caption: To retrieve the currently active run:
+
+        import mlflow
+
+        mlflow.start_run()
+        run = mlflow.last_active_run()
+        mlflow.end_run()
+
+    :return: The active run (this is equivalent to ``mlflow.active_run()``) if one exists.
+             Otherwise, the last run started from the current Python process that reached
+             a terminal status (i.e. FINISHED, FAILED, or KILLED).
+    """
+    _active_run = active_run()
+    if _active_run is not None:
+        return _active_run
+    if _last_active_run_id is None:
+        return None
+    return get_run(_last_active_run_id)
 
 
 def get_run(run_id: str) -> Run:
@@ -392,16 +515,43 @@ def get_run(run_id: str) -> Run:
     return MlflowClient().get_run(run_id)
 
 
-def log_param(key: str, value: Any) -> None:
+def log_param(key: str, value: Any) -> Any:
     """
-    Log a parameter under the current run. If no run is active, this method will create
-    a new active run.
+    Log a parameter (e.g. model hyperparameter) under the current run. If no run is active,
+    this method will create a new active run.
 
     :param key: Parameter name (string). This string may only contain alphanumerics,
                 underscores (_), dashes (-), periods (.), spaces ( ), and slashes (/).
-                All backend stores will support keys up to length 250, but some may
+                All backend stores support keys up to length 250, but some may
                 support larger keys.
     :param value: Parameter value (string, but will be string-ified if not).
+                  All backend stores support values up to length 500, but some
+                  may support larger values.
+
+    :return: the parameter value that is logged.
+
+    .. code-block:: python
+        :caption: Example
+
+        import mlflow
+
+        with mlflow.start_run():
+            value = mlflow.log_param("learning_rate", 0.01)
+            assert value == 0.01
+    """
+    run_id = _get_or_start_run().info.run_id
+    return MlflowClient().log_param(run_id, key, value)
+
+
+def set_experiment_tag(key: str, value: Any) -> None:
+    """
+    Set a tag on the current experiment. Value is converted to a string.
+
+    :param key: Tag name (string). This string may only contain alphanumerics, underscores
+                (_), dashes (-), periods (.), spaces ( ), and slashes (/).
+                All backend stores will support keys up to length 250, but some may
+                support larger keys.
+    :param value: Tag value (string, but will be string-ified if not).
                   All backend stores will support values up to length 5000, but some
                   may support larger values.
 
@@ -411,10 +561,10 @@ def log_param(key: str, value: Any) -> None:
         import mlflow
 
         with mlflow.start_run():
-            mlflow.log_param("learning_rate", 0.01)
+           mlflow.set_experiment_tag("release.version", "2.2.0")
     """
-    run_id = _get_or_start_run().info.run_id
-    MlflowClient().log_param(run_id, key, value)
+    experiment_id = _get_experiment_id()
+    MlflowClient().set_experiment_tag(experiment_id, key, value)
 
 
 def set_tag(key: str, value: Any) -> None:
@@ -492,7 +642,7 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
             mlflow.log_metric("mse", 2500.00)
     """
     run_id = _get_or_start_run().info.run_id
-    MlflowClient().log_metric(run_id, key, value, int(time.time() * 1000), step or 0)
+    MlflowClient().log_metric(run_id, key, value, get_current_time_millis(), step or 0)
 
 
 def log_metrics(metrics: Dict[str, float], step: Optional[int] = None) -> None:
@@ -521,7 +671,7 @@ def log_metrics(metrics: Dict[str, float], step: Optional[int] = None) -> None:
             mlflow.log_metrics(metrics)
     """
     run_id = _get_or_start_run().info.run_id
-    timestamp = int(time.time() * 1000)
+    timestamp = get_current_time_millis()
     metrics_arr = [Metric(key, value, timestamp, step or 0) for key, value in metrics.items()]
     MlflowClient().log_batch(run_id=run_id, metrics=metrics_arr, params=[], tags=[])
 
@@ -549,6 +699,29 @@ def log_params(params: Dict[str, Any]) -> None:
     run_id = _get_or_start_run().info.run_id
     params_arr = [Param(key, str(value)) for key, value in params.items()]
     MlflowClient().log_batch(run_id=run_id, metrics=[], params=params_arr, tags=[])
+
+
+def set_experiment_tags(tags: Dict[str, Any]) -> None:
+    """
+    Set tags for the current active experiment.
+
+    :param tags: Dictionary containing tag names and corresponding values.
+
+    .. code-block:: python
+        :caption: Example
+
+        import mlflow
+
+        tags = {"engineering": "ML Platform",
+                "release.candidate": "RC1",
+                "release.version": "2.2.0"}
+
+        # Set a batch of tags
+        with mlflow.start_run():
+            mlflow.set_experiment_tags(tags)
+    """
+    for key, value in tags.items():
+        set_experiment_tag(key, value)
 
 
 def set_tags(tags: Dict[str, Any]) -> None:
@@ -830,6 +1003,7 @@ def get_experiment(experiment_id: str) -> Experiment:
         print("Artifact Location: {}".format(experiment.artifact_location))
         print("Tags: {}".format(experiment.tags))
         print("Lifecycle_stage: {}".format(experiment.lifecycle_stage))
+        print("Creation timestamp: {}".format(experiment.creation_time))
 
     .. code-block:: text
         :caption: Output
@@ -838,6 +1012,7 @@ def get_experiment(experiment_id: str) -> Experiment:
         Artifact Location: file:///.../mlruns/0
         Tags: {}
         Lifecycle_stage: active
+        Creation timestamp: 1662004217511
     """
     return MlflowClient().get_experiment(experiment_id)
 
@@ -846,7 +1021,7 @@ def get_experiment_by_name(name: str) -> Optional[Experiment]:
     """
     Retrieve an experiment by experiment name from the backend store
 
-    :param name: The case senstive experiment name.
+    :param name: The case sensitive experiment name.
     :return: An instance of :py:class:`mlflow.entities.Experiment`
              if an experiment with the specified name exists, otherwise None.
 
@@ -861,6 +1036,7 @@ def get_experiment_by_name(name: str) -> Optional[Experiment]:
         print("Artifact Location: {}".format(experiment.artifact_location))
         print("Tags: {}".format(experiment.tags))
         print("Lifecycle_stage: {}".format(experiment.lifecycle_stage))
+        print("Creation timestamp: {}".format(experiment.creation_time))
 
     .. code-block:: text
         :caption: Output
@@ -869,30 +1045,132 @@ def get_experiment_by_name(name: str) -> Optional[Experiment]:
         Artifact Location: file:///.../mlruns/0
         Tags: {}
         Lifecycle_stage: active
+        Creation timestamp: 1662004217511
     """
     return MlflowClient().get_experiment_by_name(name)
 
 
-def list_experiments(
-    view_type: int = ViewType.ACTIVE_ONLY, max_results: Optional[int] = None,
+def search_experiments(
+    view_type: int = ViewType.ACTIVE_ONLY,
+    max_results: Optional[int] = None,
+    filter_string: Optional[str] = None,
+    order_by: Optional[List[str]] = None,
 ) -> List[Experiment]:
     """
-        :param view_type: Qualify requested type of experiments.
-        :param max_results: If passed, specifies the maximum number of experiments desired. If not
-                            passed, all experiments will be returned.
-        :return: A list of :py:class:`Experiment <mlflow.entities.Experiment>` objects.
-        """
+    Search for experiments that match the specified search query.
+
+    :param view_type: One of enum values ``ACTIVE_ONLY``, ``DELETED_ONLY``, or ``ALL``
+                      defined in :py:class:`mlflow.entities.ViewType`.
+    :param max_results: If passed, specifies the maximum number of experiments desired. If not
+                        passed, all experiments will be returned.
+    :param filter_string:
+        Filter query string (e.g., ``"name = 'my_experiment'"``), defaults to searching for all
+        experiments. The following identifiers, comparators, and logical operators are supported.
+
+        Identifiers
+          - ``name``: Experiment name
+          - ``creation_time``: Experiment creation time
+          - ``last_update_time``: Experiment last update time
+          - ``tags.<tag_key>``: Experiment tag. If ``tag_key`` contains
+            spaces, it must be wrapped with backticks (e.g., ``"tags.`extra key`"``).
+
+        Comparators for string attributes and tags
+            - ``=``: Equal to
+            - ``!=``: Not equal to
+            - ``LIKE``: Case-sensitive pattern match
+            - ``ILIKE``: Case-insensitive pattern match
+
+        Comparators for numeric attributes
+            - ``=``: Equal to
+            - ``!=``: Not equal to
+            - ``<``: Less than
+            - ``<=``: Less than or equal to
+            - ``>``: Greater than
+            - ``>=``: Greater than or equal to
+
+        Logical operators
+          - ``AND``: Combines two sub-queries and returns True if both of them are True.
+
+    :param order_by:
+        List of columns to order by. The ``order_by`` column can contain an optional ``DESC`` or
+        ``ASC`` value (e.g., ``"name DESC"``). The default ordering is ``ASC``, so ``"name"`` is
+        equivalent to ``"name ASC"``. If unspecified, defaults to ``["last_update_time DESC"]``,
+        which lists experiments updated most recently first. The following fields are supported:
+
+            - ``experiment_id``: Experiment ID
+            - ``name``: Experiment name
+            - ``creation_time``: Experiment creation time
+            - ``last_update_time``: Experiment last update time
+
+    :return: A list of :py:class:`Experiment <mlflow.entities.Experiment>` objects.
+
+    .. code-block:: python
+        :caption: Example
+
+        import mlflow
+
+
+        def assert_experiment_names_equal(experiments, expected_names):
+            actual_names = [e.name for e in experiments if e.name != "Default"]
+            assert actual_names == expected_names, (actual_names, expected_names)
+
+
+        mlflow.set_tracking_uri("sqlite:///:memory:")
+
+        # Create experiments
+        for name, tags in [
+            ("a", None),
+            ("b", None),
+            ("ab", {"k": "v"}),
+            ("bb", {"k": "V"}),
+        ]:
+            mlflow.create_experiment(name, tags=tags)
+
+        # Search for experiments with name "a"
+        experiments = mlflow.search_experiments(filter_string="name = 'a'")
+        assert_experiment_names_equal(experiments, ["a"])
+
+        # Search for experiments with name starting with "a"
+        experiments = mlflow.search_experiments(filter_string="name LIKE 'a%'")
+        assert_experiment_names_equal(experiments, ["ab", "a"])
+
+        # Search for experiments with tag key "k" and value ending with "v" or "V"
+        experiments = mlflow.search_experiments(filter_string="tags.k ILIKE '%v'")
+        assert_experiment_names_equal(experiments, ["bb", "ab"])
+
+        # Search for experiments with name ending with "b" and tag {"k": "v"}
+        experiments = mlflow.search_experiments(filter_string="name LIKE '%b' AND tags.k = 'v'")
+        assert_experiment_names_equal(experiments, ["ab"])
+
+        # Sort experiments by name in ascending order
+        experiments = mlflow.search_experiments(order_by=["name"])
+        assert_experiment_names_equal(experiments, ["a", "ab", "b", "bb"])
+
+        # Sort experiments by ID in descending order
+        experiments = mlflow.search_experiments(order_by=["experiment_id DESC"])
+        assert_experiment_names_equal(experiments, ["bb", "ab", "b", "a"])
+    """
 
     def pagination_wrapper_func(number_to_get, next_page_token):
-        return MlflowClient().list_experiments(
-            view_type=view_type, max_results=number_to_get, page_token=next_page_token,
+        return MlflowClient().search_experiments(
+            view_type=view_type,
+            max_results=number_to_get,
+            filter_string=filter_string,
+            order_by=order_by,
+            page_token=next_page_token,
         )
 
-    return _paginate(pagination_wrapper_func, SEARCH_MAX_RESULTS_DEFAULT, max_results)
+    return get_results_from_paginated_fn(
+        pagination_wrapper_func,
+        SEARCH_MAX_RESULTS_DEFAULT,
+        max_results,
+    )
 
 
 def create_experiment(
-    name: str, artifact_location: Optional[str] = None, tags: Optional[Dict[str, Any]] = None,
+    name: str,
+    artifact_location: Optional[str] = None,
+    tags: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Create an experiment.
@@ -908,24 +1186,31 @@ def create_experiment(
         :caption: Example
 
         import mlflow
+        from pathlib import Path
 
         # Create an experiment name, which must be unique and case sensitive
-        experiment_id = mlflow.create_experiment("Social NLP Experiments")
+        experiment_id = mlflow.create_experiment(
+            "Social NLP Experiments",
+            artifact_location=Path.cwd().joinpath("mlruns").as_uri(),
+            tags={"version": "v1", "priority": "P1"},
+        )
         experiment = mlflow.get_experiment(experiment_id)
         print("Name: {}".format(experiment.name))
         print("Experiment_id: {}".format(experiment.experiment_id))
         print("Artifact Location: {}".format(experiment.artifact_location))
         print("Tags: {}".format(experiment.tags))
         print("Lifecycle_stage: {}".format(experiment.lifecycle_stage))
+        print("Creation timestamp: {}".format(experiment.creation_time))
 
     .. code-block:: text
         :caption: Output
 
         Name: Social NLP Experiments
         Experiment_id: 1
-        Artifact Location: file:///.../mlruns/1
-        Tags= {}
+        Artifact Location: file:///.../mlruns
+        Tags: {'version': 'v1', 'priority': 'P1'}
         Lifecycle_stage: active
+        Creation timestamp: 1662004217511
     """
     return MlflowClient().create_experiment(name, artifact_location, tags)
 
@@ -949,13 +1234,14 @@ def delete_experiment(experiment_id: str) -> None:
         print("Name: {}".format(experiment.name))
         print("Artifact Location: {}".format(experiment.artifact_location))
         print("Lifecycle_stage: {}".format(experiment.lifecycle_stage))
-
+        print("Last Updated timestamp: {}".format(experiment.last_update_time))
     .. code-block:: text
         :caption: Output
 
         Name: New Experiment
         Artifact Location: file:///.../mlruns/2
         Lifecycle_stage: deleted
+        Last Updated timestamp: 1662004217511
     """
     MlflowClient().delete_experiment(experiment_id)
 
@@ -1000,7 +1286,7 @@ def get_artifact_uri(artifact_path: Optional[str] = None) -> str:
     :param artifact_path: The run-relative artifact path for which to obtain an absolute URI.
                           For example, "path/to/artifact". If unspecified, the artifact root URI
                           for the currently active run will be returned.
-    :return: An *absolute* URI referring to the specified artifact or the currently adtive run's
+    :return: An *absolute* URI referring to the specified artifact or the currently active run's
              artifact root. For example, if an artifact path is provided and the currently active
              run uses an S3-backed store, this may be a uri of the form
              ``s3://<bucket_name>/path/to/artifact/root/path/to/artifact``. If an artifact path
@@ -1046,11 +1332,17 @@ def search_runs(
     max_results: int = SEARCH_MAX_RESULTS_PANDAS,
     order_by: Optional[List[str]] = None,
     output_format: str = "pandas",
+    search_all_experiments: bool = False,
+    experiment_names: Optional[List[str]] = None,
 ) -> Union[List[Run], "pandas.DataFrame"]:
     """
-    Get a pandas DataFrame of runs that fit the search criteria.
+    Search for Runs that fit the specified criteria.
 
-    :param experiment_ids: List of experiment IDs. None will default to the active experiment.
+    :param experiment_ids: List of experiment IDs. Search can work with experiment IDs or
+                           experiment names, but not both in the same call. Values other than
+                           ``None`` or ``[]`` will result in error if ``experiment_names`` is
+                           also not ``None`` or ``[]``. ``None`` will default to the active
+                           experiment if ``experiment_names`` is ``None`` or ``[]``.
     :param filter_string: Filter query string, defaults to searching all runs.
     :param run_view_type: one of enum values ``ACTIVE_ONLY``, ``DELETED_ONLY``, or ``ALL`` runs
                             defined in :py:class:`mlflow.entities.ViewType`.
@@ -1062,7 +1354,13 @@ def search_runs(
     :param output_format: The output format to be returned. If ``pandas``, a ``pandas.DataFrame``
                           is returned and, if ``list``, a list of :py:class:`mlflow.entities.Run`
                           is returned.
-
+    :param search_all_experiments: Boolean specifying whether all experiments should be searched.
+        Only honored if ``experiment_ids`` is ``[]`` or ``None``.
+    :param experiment_names: List of experiment names. Search can work with experiment IDs or
+                             experiment names, but not both in the same call. Values other
+                             than ``None`` or ``[]`` will result in error if ``experiment_ids``
+                             is also not ``None`` or ``[]``. ``None`` will default to the active
+                             experiment if ``experiment_ids`` is ``None`` or ``[]``.
     :return: If output_format is ``list``: a list of :py:class:`mlflow.entities.Run`. If
              output_format is ``pandas``: ``pandas.DataFrame`` of runs, where each metric,
              parameter, and tag is expanded into its own column named metrics.*, params.*, or
@@ -1076,7 +1374,8 @@ def search_runs(
         import mlflow
 
         # Create an experiment and log two runs under it
-        experiment_id = mlflow.create_experiment("Social NLP Experiments")
+        experiment_name = "Social NLP Experiments"
+        experiment_id = mlflow.create_experiment(experiment_name)
         with mlflow.start_run(experiment_id=experiment_id):
             mlflow.log_metric("m", 1.55)
             mlflow.set_tag("s.release", "1.1.0-RC")
@@ -1084,7 +1383,7 @@ def search_runs(
             mlflow.log_metric("m", 2.50)
             mlflow.set_tag("s.release", "1.2.0-GA")
 
-        # Search all runs in experiment_id
+        # Search for all the runs in the experiment with the given experiment ID
         df = mlflow.search_runs([experiment_id], order_by=["metrics.m DESC"])
         print(df[["metrics.m", "tags.s.release", "run_id"]])
         print("--")
@@ -1094,6 +1393,12 @@ def search_runs(
         filter_string = "tags.s.release ILIKE '%rc%'"
         df = mlflow.search_runs([experiment_id], filter_string=filter_string)
         print(df[["metrics.m", "tags.s.release", "run_id"]])
+        print("--")
+
+        # Search for all the runs in the experiment with the given experiment name
+        df = mlflow.search_runs(experiment_names=[experiment_name], order_by=["metrics.m DESC"])
+        print(df[["metrics.m", "tags.s.release", "run_id"]])
+
 
     .. code-block:: text
         :caption: Output
@@ -1104,18 +1409,47 @@ def search_runs(
         --
            metrics.m tags.s.release                            run_id
         0       1.55       1.1.0-RC  5cc7feaf532f496f885ad7750809c4d4
+        --
+           metrics.m tags.s.release                            run_id
+        0       2.50       1.2.0-GA  147eed886ab44633902cc8e19b2267e2
+        1       1.55       1.1.0-RC  5cc7feaf532f496f885ad7750809c4d4
     """
-    if not experiment_ids:
+    no_ids = experiment_ids is None or len(experiment_ids) == 0
+    no_names = experiment_names is None or len(experiment_names) == 0
+    no_ids_or_names = no_ids and no_names
+    if not no_ids and not no_names:
+        raise MlflowException(
+            message="Only experiment_ids or experiment_names can be used, but not both",
+            error_code=INVALID_PARAMETER_VALUE,
+        )
+
+    if search_all_experiments and no_ids_or_names:
+        experiment_ids = [
+            exp.experiment_id for exp in search_experiments(view_type=ViewType.ACTIVE_ONLY)
+        ]
+    elif no_ids_or_names:
         experiment_ids = _get_experiment_id()
+    elif not no_names:
+        experiments = [get_experiment_by_name(n) for n in experiment_names if n is not None]
+        experiment_ids = [e.experiment_id for e in experiments if e is not None]
 
     # Using an internal function as the linter doesn't like assigning a lambda, and inlining the
     # full thing is a mess
     def pagination_wrapper_func(number_to_get, next_page_token):
         return MlflowClient().search_runs(
-            experiment_ids, filter_string, run_view_type, number_to_get, order_by, next_page_token,
+            experiment_ids,
+            filter_string,
+            run_view_type,
+            number_to_get,
+            order_by,
+            next_page_token,
         )
 
-    runs = _paginate(pagination_wrapper_func, NUM_RUNS_PER_PAGE_PANDAS, max_results)
+    runs = get_results_from_paginated_fn(
+        pagination_wrapper_func,
+        NUM_RUNS_PER_PAGE_PANDAS,
+        max_results,
+    )
 
     if output_format == "list":
         return runs  # List[mlflow.entities.run.Run]
@@ -1179,120 +1513,18 @@ def search_runs(
 
         data = {}
         data.update(info)
-        for key in metrics:
-            data["metrics." + key] = metrics[key]
-        for key in params:
-            data["params." + key] = params[key]
-        for key in tags:
-            data["tags." + key] = tags[key]
+        for key, value in metrics.items():
+            data["metrics." + key] = value
+        for key, value in params.items():
+            data["params." + key] = value
+        for key, value in tags.items():
+            data["tags." + key] = value
         return pd.DataFrame(data)
     else:
         raise ValueError(
             "Unsupported output format: %s. Supported string values are 'pandas' or 'list'"
             % output_format
         )
-
-
-def list_run_infos(
-    experiment_id: str,
-    run_view_type: int = ViewType.ACTIVE_ONLY,
-    max_results: int = SEARCH_MAX_RESULTS_DEFAULT,
-    order_by: Optional[List[str]] = None,
-) -> List[RunInfo]:
-    """
-    Return run information for runs which belong to the experiment_id.
-
-    :param experiment_id: The experiment id which to search
-    :param run_view_type: ACTIVE_ONLY, DELETED_ONLY, or ALL runs
-    :param max_results: Maximum number of results desired.
-    :param order_by: List of order_by clauses. Currently supported values are
-           are ``metric.key``, ``parameter.key``, ``tag.key``, ``attribute.key``.
-           For example, ``order_by=["tag.release ASC", "metric.click_rate DESC"]``.
-
-    :return: A list of :py:class:`RunInfo <mlflow.entities.RunInfo>` objects that satisfy the
-        search expressions.
-
-    .. code-block:: python
-        :caption: Example
-
-        import mlflow
-        from mlflow.entities import ViewType
-
-        # Create two runs
-        with mlflow.start_run() as run1:
-            mlflow.log_param("p", 0)
-
-        with mlflow.start_run() as run2:
-            mlflow.log_param("p", 1)
-
-        # Delete the last run
-        mlflow.delete_run(run2.info.run_id)
-
-        def print_run_infos(run_infos):
-            for r in run_infos:
-                print("- run_id: {}, lifecycle_stage: {}".format(r.run_id, r.lifecycle_stage))
-
-        print("Active runs:")
-        print_run_infos(mlflow.list_run_infos("0", run_view_type=ViewType.ACTIVE_ONLY))
-
-        print("Deleted runs:")
-        print_run_infos(mlflow.list_run_infos("0", run_view_type=ViewType.DELETED_ONLY))
-
-        print("All runs:")
-        print_run_infos(mlflow.list_run_infos("0", run_view_type=ViewType.ALL))
-
-    .. code-block:: text
-        :caption: Output
-
-        Active runs:
-        - run_id: 4937823b730640d5bed9e3e5057a2b34, lifecycle_stage: active
-        Deleted runs:
-        - run_id: b13f1badbed842cf9975c023d23da300, lifecycle_stage: deleted
-        All runs:
-        - run_id: b13f1badbed842cf9975c023d23da300, lifecycle_stage: deleted
-        - run_id: 4937823b730640d5bed9e3e5057a2b34, lifecycle_stage: active
-    """
-    # Using an internal function as the linter doesn't like assigning a lambda, and inlining the
-    # full thing is a mess
-    def pagination_wrapper_func(number_to_get, next_page_token):
-        return MlflowClient().list_run_infos(
-            experiment_id, run_view_type, number_to_get, order_by, next_page_token
-        )
-
-    return _paginate(pagination_wrapper_func, SEARCH_MAX_RESULTS_DEFAULT, max_results)
-
-
-def _paginate(paginated_fn, max_results_per_page, max_results=None):
-    """
-    Intended to be a general use pagination utility.
-
-    :param paginated_fn:
-    :type paginated_fn: This function is expected to take in the number of results to retrieve
-        per page and a pagination token, and return a PagedList object
-    :param max_results_per_page:
-    :type max_results_per_page: The maximum number of results to retrieve per page
-    :param max_results:
-    :type max_results: The maximum number of results to retrieve overall. If unspecified,
-                       all results will be retrieved.
-    :return: Returns a list of entities, as determined by the paginated_fn parameter, with no more
-        entities than specified by max_results
-    :rtype: list[object]
-    """
-    all_results = []
-    next_page_token = None
-    returns_all = max_results is None
-    while returns_all or len(all_results) < max_results:
-        num_to_get = max_results_per_page if returns_all else max_results - len(all_results)
-        if num_to_get < max_results_per_page:
-            page_results = paginated_fn(num_to_get, next_page_token)
-        else:
-            page_results = paginated_fn(max_results_per_page, next_page_token)
-        all_results.extend(page_results)
-        if hasattr(page_results, "token") and page_results.token:
-            next_page_token = page_results.token
-        else:
-            break
-    return all_results
 
 
 def _get_or_start_run():
@@ -1303,21 +1535,40 @@ def _get_or_start_run():
 
 def _get_experiment_id_from_env():
     experiment_name = env.get_env(_EXPERIMENT_NAME_ENV_VAR)
+    experiment_id = env.get_env(_EXPERIMENT_ID_ENV_VAR)
     if experiment_name is not None:
         exp = MlflowClient().get_experiment_by_name(experiment_name)
-        return exp.experiment_id if exp else None
-    return env.get_env(_EXPERIMENT_ID_ENV_VAR)
+        if exp:
+            if experiment_id and experiment_id != exp.experiment_id:
+                raise MlflowException(
+                    message=f"The provided {_EXPERIMENT_ID_ENV_VAR} environment variable "
+                    f"value `{experiment_id}` does not match the experiment id "
+                    f"`{exp.experiment_id}` for experiment name `{experiment_name}`",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+            else:
+                return exp.experiment_id
+        else:
+            experiment_id = MlflowClient().create_experiment(name=experiment_name)
+            return experiment_id
+    if experiment_id is not None:
+        try:
+            exp = MlflowClient().get_experiment(experiment_id)
+            return exp.experiment_id
+        except MlflowException as exc:
+            raise MlflowException(
+                message=f"The provided {_EXPERIMENT_ID_ENV_VAR} environment variable "
+                f"value `{experiment_id}` does not exist in the tracking server. Provide a valid "
+                f"experiment_id.",
+                error_code=INVALID_PARAMETER_VALUE,
+            ) from exc
 
 
 def _get_experiment_id():
-    # TODO: Replace with None for 1.0, leaving for 0.9.1 release backcompat with existing servers
-    deprecated_default_exp_id = "0"
-
-    return (
-        _active_experiment_id
-        or _get_experiment_id_from_env()
-        or (is_in_databricks_notebook() and get_notebook_id())
-    ) or deprecated_default_exp_id
+    if _active_experiment_id:
+        return _active_experiment_id
+    else:
+        return _get_experiment_id_from_env() or default_experiment_registry.get_experiment_id()
 
 
 @autologging_integration("mlflow")
@@ -1394,7 +1645,7 @@ def autolog(
 
         import numpy as np
         import mlflow.sklearn
-        from mlflow.tracking import MlflowClient
+        from mlflow import MlflowClient
         from sklearn.linear_model import LinearRegression
 
         def print_auto_logged_info(r):
@@ -1438,7 +1689,6 @@ def autolog(
     """
     from mlflow import (
         tensorflow,
-        keras,
         gluon,
         xgboost,
         lightgbm,
@@ -1456,7 +1706,6 @@ def autolog(
     # eg: mxnet.gluon is the actual library, mlflow.gluon.autolog is our autolog function for it
     LIBRARY_TO_AUTOLOG_FN = {
         "tensorflow": tensorflow.autolog,
-        "keras": keras.autolog,
         "mxnet.gluon": gluon.autolog,
         "xgboost": xgboost.autolog,
         "lightgbm": lightgbm.autolog,
@@ -1469,8 +1718,6 @@ def autolog(
         # Pytorch frameworks under mlflow.pytorch.autolog
         "pytorch_lightning": pytorch.autolog,
     }
-
-    CONF_KEY_IS_GLOBALLY_CONFIGURED = "globally_configured"
 
     def get_autologging_params(autolog_fn):
         try:
@@ -1488,20 +1735,22 @@ def autolog(
             # Logic is as follows:
             # - if a previous_config exists, that means either `mlflow.autolog` or
             #   `mlflow.integration.autolog` was called.
-            # - if the config contains `CONF_KEY_IS_GLOBALLY_CONFIGURED`, the configuration
-            #   was set by `mlflow.autolog`, and so we can safely call `autolog_fn` with
-            #   `autologging_params`.
+            # - if the config contains `AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED`, the
+            #   configuration was set by `mlflow.autolog`, and so we can safely call `autolog_fn`
+            #   with `autologging_params`.
             # - if the config doesn't contain this key, the configuration was set by an
             #   `mlflow.integration.autolog` call, so we should not call `autolog_fn` with
             #   new configs.
             prev_config = AUTOLOGGING_INTEGRATIONS.get(autolog_fn.integration_name)
-            if prev_config and not prev_config.get(CONF_KEY_IS_GLOBALLY_CONFIGURED, False):
+            if prev_config and not prev_config.get(
+                AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED, False
+            ):
                 return
 
             autologging_params = get_autologging_params(autolog_fn)
             autolog_fn(**autologging_params)
             AUTOLOGGING_INTEGRATIONS[autolog_fn.integration_name][
-                CONF_KEY_IS_GLOBALLY_CONFIGURED
+                AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED
             ] = True
             if not autologging_is_disabled(
                 autolog_fn.integration_name
@@ -1522,63 +1771,8 @@ def autolog(
     # for each autolog library (except pyspark), register a post-import hook.
     # this way, we do not send any errors to the user until we know they are using the library.
     # the post-import hook also retroactively activates for previously-imported libraries.
-    for module in list(
-        set(LIBRARY_TO_AUTOLOG_FN.keys()) - set(["tensorflow", "keras", "pyspark", "pyspark.ml"])
-    ):
+    for module in list(set(LIBRARY_TO_AUTOLOG_FN.keys()) - {"pyspark", "pyspark.ml"}):
         register_post_import_hook(setup_autologging, module, overwrite=True)
-
-    FULLY_IMPORTED_KERAS = False
-    TF_AUTOLOG_SETUP_CALLED = False
-
-    def conditionally_set_up_keras_autologging(keras_module):
-        nonlocal FULLY_IMPORTED_KERAS, TF_AUTOLOG_SETUP_CALLED
-        FULLY_IMPORTED_KERAS = True
-
-        if Version(keras_module.__version__) >= Version("2.6.0"):
-            # NB: Keras unconditionally depends on TensorFlow beginning with Version 2.6.0, and
-            # many classes defined in the `keras` module are aliases of classes in the `tf.keras`
-            # module. Accordingly, TensorFlow autologging serves as a replacement for Keras
-            # autologging in Keras >= 2.6.0
-            try:
-                import tensorflow
-
-                setup_autologging(tensorflow)
-                TF_AUTOLOG_SETUP_CALLED = True
-            except Exception as e:
-                _logger.debug(
-                    "Failed to set up TensorFlow autologging for tf.keras models upon"
-                    " Keras library import: %s",
-                    str(e),
-                )
-                raise
-        else:
-            setup_autologging(keras_module)
-
-    register_post_import_hook(conditionally_set_up_keras_autologging, "keras", overwrite=True)
-
-    def set_up_tensorflow_autologging(tensorflow_module):
-        import sys
-
-        nonlocal FULLY_IMPORTED_KERAS, TF_AUTOLOG_SETUP_CALLED
-        if "keras" in sys.modules and not FULLY_IMPORTED_KERAS:
-            # In Keras >= 2.6.0, importing Keras imports the TensorFlow library, which can
-            # trigger this autologging import hook for TensorFlow before the entire Keras import
-            # procedure is completed. Attempting to set up autologging before the Keras import
-            # procedure has completed will result in a failure due to the unavailability of
-            # certain modules. In this case, we terminate the TensorFlow autologging import hook
-            # and rely on the Keras autologging import hook to successfully set up TensorFlow
-            # autologging for tf.keras models once the Keras import procedure has completed
-            return
-
-        # By design, in Keras >= 2.6.0, Keras needs to enable tensorflow autologging so that
-        # tf.keras models always use tensorflow autologging, rather than vanilla keras autologging.
-        # As a result, Keras autologging must call `mlflow.tensorflow.autolog()` in Keras >= 2.6.0.
-        # Accordingly, we insert this check to ensure that importing tensorflow, which may import
-        # keras, does not enable tensorflow autologging twice.
-        if not TF_AUTOLOG_SETUP_CALLED:
-            setup_autologging(tensorflow_module)
-
-    register_post_import_hook(set_up_tensorflow_autologging, "tensorflow", overwrite=True)
 
     # for pyspark, we activate autologging immediately, without waiting for a module import.
     # this is because on Databricks a SparkSession already exists and the user can directly

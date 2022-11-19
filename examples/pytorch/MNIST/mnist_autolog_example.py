@@ -10,6 +10,7 @@
 # pylint: disable=abstract-method
 import pytorch_lightning as pl
 import mlflow.pytorch
+import logging
 import os
 import torch
 from argparse import ArgumentParser
@@ -31,7 +32,7 @@ class MNISTDataModule(pl.LightningDataModule):
         """
         Initialization of inherited lightning data module
         """
-        super(MNISTDataModule, self).__init__()
+        super().__init__()
         self.df_train = None
         self.df_val = None
         self.df_test = None
@@ -69,7 +70,7 @@ class MNISTDataModule(pl.LightningDataModule):
         :return: Returns the constructed dataloader
         """
         return DataLoader(
-            df, batch_size=self.args["batch_size"], num_workers=self.args["num_workers"],
+            df, batch_size=self.args["batch_size"], num_workers=self.args["num_workers"]
         )
 
     def train_dataloader(self):
@@ -96,7 +97,7 @@ class LightningMNISTClassifier(pl.LightningModule):
         """
         Initializes the network
         """
-        super(LightningMNISTClassifier, self).__init__()
+        super().__init__()
 
         # mnist images are (1, 28, 28) (channels, width, height)
         self.optimizer = None
@@ -124,7 +125,11 @@ class LightningMNISTClassifier(pl.LightningModule):
             help="number of workers (default: 3)",
         )
         parser.add_argument(
-            "--lr", type=float, default=0.001, metavar="LR", help="learning rate (default: 0.001)",
+            "--lr",
+            type=float,
+            default=0.001,
+            metavar="LR",
+            help="learning rate (default: 0.001)",
         )
         return parser
 
@@ -226,7 +231,7 @@ class LightningMNISTClassifier(pl.LightningModule):
         :return: output - average test loss
         """
         avg_test_acc = torch.stack([x["test_acc"] for x in outputs]).mean()
-        self.log("avg_test_acc", avg_test_acc)
+        self.log("avg_test_acc", avg_test_acc, sync_dist=True)
 
     def configure_optimizers(self):
         """
@@ -237,7 +242,12 @@ class LightningMNISTClassifier(pl.LightningModule):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.args["lr"])
         self.scheduler = {
             "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode="min", factor=0.2, patience=2, min_lr=1e-6, verbose=True,
+                self.optimizer,
+                mode="min",
+                factor=0.2,
+                patience=2,
+                min_lr=1e-6,
+                verbose=True,
             ),
             "monitor": "val_loss",
         }
@@ -265,14 +275,16 @@ if __name__ == "__main__":
     parser = pl.Trainer.add_argparse_args(parent_parser=parser)
     parser = LightningMNISTClassifier.add_model_specific_args(parent_parser=parser)
 
-    mlflow.pytorch.autolog()
-
     args = parser.parse_args()
     dict_args = vars(args)
 
-    if "accelerator" in dict_args:
-        if dict_args["accelerator"] == "None":
-            dict_args["accelerator"] = None
+    if "strategy" in dict_args:
+        if dict_args["strategy"] == "None":
+            dict_args["strategy"] = None
+
+    if "devices" in dict_args:
+        if dict_args["devices"] == "None":
+            dict_args["devices"] = None
 
     model = LightningMNISTClassifier(**dict_args)
 
@@ -292,7 +304,26 @@ if __name__ == "__main__":
     lr_logger = LearningRateMonitor()
 
     trainer = pl.Trainer.from_argparse_args(
-        args, callbacks=[lr_logger, early_stopping, checkpoint_callback], checkpoint_callback=True
+        args, callbacks=[lr_logger, early_stopping, checkpoint_callback]
     )
+
+    # It is safe to use `mlflow.pytorch.autolog` in DDP training, as below condition invokes
+    # autolog with only rank 0 gpu.
+
+    # For CPU Training
+    if dict_args["devices"] is None or int(dict_args["devices"]) == 0:
+        mlflow.pytorch.autolog()
+    elif int(dict_args["devices"]) >= 1 and trainer.global_rank == 0:
+        # In case of multi gpu training, the training script is invoked multiple times,
+        # The following condition is needed to avoid multiple copies of mlflow runs.
+        # When one or more gpus are used for training, it is enough to save
+        # the model and its parameters using rank 0 gpu.
+        mlflow.pytorch.autolog()
+    else:
+        # This condition is met only for multi-gpu training when the global rank is non zero.
+        # Since the parameters are already logged using global rank 0 gpu, it is safe to ignore
+        # this condition.
+        logging.info("Active run exists.. ")
+
     trainer.fit(model, dm)
-    trainer.test()
+    trainer.test(datamodule=dm, ckpt_path="best")

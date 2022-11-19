@@ -99,22 +99,13 @@ def test_rename_registered_model(mock_store):
 
 def test_update_registered_model_validation_errors_on_empty_new_name(mock_store):
     # pylint: disable=unused-argument
-    with pytest.raises(MlflowException):
+    with pytest.raises(MlflowException, match="The name must not be an empty string"):
         newModelRegistryClient().rename_registered_model("Model 1", " ")
 
 
 def test_delete_registered_model(mock_store):
     newModelRegistryClient().delete_registered_model("Model 1")
     mock_store.delete_registered_model.assert_called_once()
-
-
-def test_list_registered_models(mock_store):
-    mock_store.list_registered_models.return_value = PagedList(
-        [RegisteredModel("Model 1"), RegisteredModel("Model 2")], ""
-    )
-    result = newModelRegistryClient().list_registered_models()
-    mock_store.list_registered_models.assert_called_once()
-    assert len(result) == 2
 
 
 def test_search_registered_models(mock_store):
@@ -208,7 +199,7 @@ def test_create_model_version_when_wait_exceeds_time(mock_store):
     mock_store.create_model_version.return_value = mv
     mock_store.get_model_version.return_value = mv
 
-    with pytest.raises(MlflowException):
+    with pytest.raises(MlflowException, match="Exceeded max wait time"):
         newModelRegistryClient().create_model_version(
             name, "uri:/source", "run123", await_creation_for=1
         )
@@ -318,7 +309,7 @@ def test_transition_model_version_stage(mock_store):
 
 def test_transition_model_version_stage_validation_errors(mock_store):
     # pylint: disable=unused-argument
-    with pytest.raises(MlflowException):
+    with pytest.raises(MlflowException, match="The stage must not be an empty string"):
         newModelRegistryClient().transition_model_version_stage("Model 1", "12", stage=" ")
 
 

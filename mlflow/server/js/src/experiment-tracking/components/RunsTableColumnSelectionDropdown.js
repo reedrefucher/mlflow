@@ -1,6 +1,5 @@
 import React from 'react';
-import { Dropdown, Icon, Menu } from 'antd';
-import { Button } from '../../shared/building_blocks/Button';
+import { Dropdown, Menu, Button, ChevronDownIcon } from '@databricks/design-system';
 import { SearchTree } from '../../common/components/SearchTree';
 import PropTypes from 'prop-types';
 import _ from 'lodash';
@@ -112,12 +111,14 @@ export class RunsTableColumnSelectionDropdown extends React.Component {
     const { menuVisible } = this.state;
     const content = (
       <Menu style={{ maxHeight: 480, overflowY: 'scroll' }}>
-        <SearchTree
-          data={this.getData()}
-          onCheck={this.handleCheck}
-          checkedKeys={this.getCheckedKeys()}
-          onSearchInputEscapeKeyPress={this.handleSearchInputEscapeKeyPress}
-        />
+        <Menu.Item css={styles.menuItem} key='this-menu-needs-at-least-1-menu-item'>
+          <SearchTree
+            data={this.getData()}
+            onCheck={this.handleCheck}
+            checkedKeys={this.getCheckedKeys()}
+            onSearchInputEscapeKeyPress={this.handleSearchInputEscapeKeyPress}
+          />
+        </Menu.Item>
       </Menu>
     );
     return (
@@ -129,14 +130,14 @@ export class RunsTableColumnSelectionDropdown extends React.Component {
       >
         <Button
           style={{ display: 'flex', alignItems: 'center' }}
-          dataTestId='column-selection-dropdown'
+          data-testid='column-selection-dropdown'
         >
-          <Icon type='setting' style={{ marginTop: 2 }} />
           <FormattedMessage
             defaultMessage='Columns'
             // eslint-disable-next-line max-len
             description='Dropdown text to display columns names that could to be rendered for the experiment runs table'
-          />
+          />{' '}
+          <ChevronDownIcon css={styles.buttonIcon} />
         </Button>
       </Dropdown>
     );
@@ -166,3 +167,13 @@ export function getCategorizedUncheckedKeys(checkedKeys, allKeys) {
   });
   return result;
 }
+
+const styles = {
+  menuItem: {
+    '&:hover': {
+      backgroundColor: 'inherit !important;',
+    },
+  },
+  // TODO: remove icon style override when DuBois will fix icon sizes
+  buttonIcon: { verticalAlign: 'bottom', svg: { width: 18, height: 18 } },
+};

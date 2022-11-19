@@ -12,7 +12,7 @@ import mlflow.pytorch
 
 class IrisClassifier(nn.Module):
     def __init__(self):
-        super(IrisClassifier, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(4, 10)
         self.fc2 = nn.Linear(10, 10)
         self.fc3 = nn.Linear(10, 3)
@@ -69,9 +69,7 @@ def test_model(model, X_test, y_test):
         predict_out = model(X_test)
         _, predict_y = torch.max(predict_out, 1)
 
-        print(
-            "\nprediction accuracy", float(accuracy_score(y_test.cpu(), predict_y.cpu())),
-        )
+        print("\nprediction accuracy", float(accuracy_score(y_test.cpu(), predict_y.cpu())))
 
 
 if __name__ == "__main__":

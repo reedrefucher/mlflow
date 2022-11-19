@@ -3,8 +3,8 @@ import PropTypes from 'prop-types';
 import { ModelVersionTable } from './ModelVersionTable';
 import Utils from '../../common/utils/Utils';
 import { Link } from 'react-router-dom';
-import { modelListPageRoute, getCompareModelVersionsPageRoute, getModelPageRoute } from '../routes';
-import { Button as AntdButton, Descriptions, Modal, message } from 'antd';
+import { modelListPageRoute, getCompareModelVersionsPageRoute } from '../routes';
+import { message } from 'antd';
 import { ACTIVE_STAGES } from '../constants';
 import { CollapsibleSection } from '../../common/components/CollapsibleSection';
 import { EditableNote } from '../../common/components/EditableNote';
@@ -13,10 +13,14 @@ import { getRegisteredModelTags } from '../reducers';
 import { setRegisteredModelTagApi, deleteRegisteredModelTagApi } from '../actions';
 import { connect } from 'react-redux';
 import { OverflowMenu, PageHeader } from '../../shared/building_blocks/PageHeader';
-import { Spacer } from '../../shared/building_blocks/Spacer';
-import { Button } from '../../shared/building_blocks/Button';
-import { Radio } from '../../shared/building_blocks/Radio';
 import { FormattedMessage, injectIntl } from 'react-intl';
+import {
+  Modal,
+  Button,
+  SegmentedControlGroup,
+  SegmentedControlButton,
+} from '@databricks/design-system';
+import { Descriptions } from '../../common/components/Descriptions';
 
 export const StageFilters = {
   ALL: 'ALL',
@@ -56,7 +60,10 @@ export class ModelViewImpl extends React.Component {
     isDeleteModalConfirmLoading: false,
     runsSelected: {},
     isTagsRequestPending: false,
+    updatingEmailPreferences: false,
   };
+
+  formRef = React.createRef();
 
   componentDidMount() {
     const pageTitle = `${this.props.model.name} - MLflow Model`;
@@ -138,31 +145,22 @@ export class ModelViewImpl extends React.Component {
       });
   };
 
-  saveFormRef = (formRef) => {
-    this.formRef = formRef;
-  };
-
-  handleAddTag = (e) => {
-    e.preventDefault();
-    const { form } = this.formRef.props;
+  handleAddTag = (values) => {
+    const form = this.formRef.current;
     const { model } = this.props;
     const modelName = model.name;
-    form.validateFields((err, values) => {
-      if (!err) {
-        this.setState({ isTagsRequestPending: true });
-        this.props
-          .setRegisteredModelTagApi(modelName, values.name, values.value)
-          .then(() => {
-            this.setState({ isTagsRequestPending: false });
-            form.resetFields();
-          })
-          .catch((ex) => {
-            this.setState({ isTagsRequestPending: false });
-            console.error(ex);
-            message.error('Failed to add tag. Error: ' + ex.getUserVisibleError());
-          });
-      }
-    });
+    this.setState({ isTagsRequestPending: true });
+    this.props
+      .setRegisteredModelTagApi(modelName, values.name, values.value)
+      .then(() => {
+        this.setState({ isTagsRequestPending: false });
+        form.resetFields();
+      })
+      .catch((ex) => {
+        this.setState({ isTagsRequestPending: false });
+        console.error(ex);
+        message.error('Failed to add tag. Error: ' + ex.getUserVisibleError());
+      });
   };
 
   handleSaveEdit = ({ name, value }) => {
@@ -203,9 +201,10 @@ export class ModelViewImpl extends React.Component {
 
   renderDescriptionEditIcon() {
     return (
-      <AntdButton
+      <Button
         data-test-id='descriptionEditButton'
         type='link'
+        css={styles.editButton}
         onClick={this.startEditingDescription}
       >
         <FormattedMessage
@@ -213,7 +212,7 @@ export class ModelViewImpl extends React.Component {
           description='Text for the edit button next to the description section title on
              the model view page'
         />
-      </AntdButton>
+      </Button>
     );
   }
 
@@ -229,10 +228,11 @@ export class ModelViewImpl extends React.Component {
     const modelName = model.name;
     const compareDisabled = Object.keys(this.state.runsSelected).length < 2;
     return (
-      <div className='model-view-content'>
+      <div css={styles.wrapper}>
         {/* Metadata List */}
-        <Descriptions className='metadata-list'>
+        <Descriptions columns={3} data-testid='model-view-metadata'>
           <Descriptions.Item
+            data-testid='model-view-metadata-item'
             label={this.props.intl.formatMessage({
               defaultMessage: 'Created Time',
               description:
@@ -242,6 +242,7 @@ export class ModelViewImpl extends React.Component {
             {Utils.formatTimestamp(model.creation_timestamp)}
           </Descriptions.Item>
           <Descriptions.Item
+            data-testid='model-view-metadata-item'
             label={this.props.intl.formatMessage({
               defaultMessage: 'Last Modified',
               description:
@@ -250,35 +251,44 @@ export class ModelViewImpl extends React.Component {
           >
             {Utils.formatTimestamp(model.last_updated_timestamp)}
           </Descriptions.Item>
+          {/* Reported during ESLint upgrade */}
+          {/* eslint-disable-next-line react/prop-types */}
           {model.user_id && (
             <Descriptions.Item
+              data-testid='model-view-metadata-item'
               label={this.props.intl.formatMessage({
                 defaultMessage: 'Creator',
                 description: 'Lable name for the creator under details tab on the model view page',
               })}
             >
-              {model.user_id}
+              {/* eslint-disable-next-line react/prop-types */}
+              <div>{model.user_id}</div>
             </Descriptions.Item>
           )}
         </Descriptions>
 
         {/* Page Sections */}
         <CollapsibleSection
+          css={styles.collapsiblePanel}
           title={
             <span>
               <FormattedMessage
                 defaultMessage='Description'
                 description='Title text for the description section under details tab on the model
                    view page'
-              />
+              />{' '}
               {!showDescriptionEditor ? this.renderDescriptionEditIcon() : null}
             </span>
           }
           forceOpen={showDescriptionEditor}
+          // Reported during ESLint upgrade
+          // eslint-disable-next-line react/prop-types
           defaultCollapsed={!model.description}
           data-test-id='model-description-section'
         >
           <EditableNote
+            // Reported during ESLint upgrade
+            // eslint-disable-next-line react/prop-types
             defaultMarkdown={model.description}
             onSubmit={this.handleSubmitEditDescription}
             onCancel={this.handleCancelEditDescription}
@@ -298,7 +308,7 @@ export class ModelViewImpl extends React.Component {
             data-test-id='model-tags-section'
           >
             <EditableTagsTableView
-              wrappedComponentRef={this.saveFormRef}
+              innerRef={this.formRef}
               handleAddTag={this.handleAddTag}
               handleDeleteTag={this.handleDeleteTag}
               handleSaveEdit={this.handleSaveEdit}
@@ -309,8 +319,8 @@ export class ModelViewImpl extends React.Component {
         </div>
         <CollapsibleSection
           title={
-            <div className='ModelView-run-buttons'>
-              <Spacer direction='horizontal' size='large'>
+            <>
+              <div css={styles.versionsTabButtons}>
                 <span>
                   <FormattedMessage
                     defaultMessage='Versions'
@@ -318,37 +328,28 @@ export class ModelViewImpl extends React.Component {
                        model view page'
                   />
                 </span>
-                <Radio
-                  defaultValue={StageFilters.ALL}
-                  items={[
-                    {
-                      value: StageFilters.ALL,
-                      itemContent: this.props.intl.formatMessage({
-                        defaultMessage: 'All',
-                        description:
-                          'Tab text to view all versions under details tab on' +
-                          ' the model view page',
-                      }),
-                      onClick: (e) => this.handleStageFilterChange(e),
-                      dataTestId: 'allModelsToggleButton',
-                    },
-                    {
-                      value: StageFilters.ACTIVE,
-                      itemContent: (
-                        <span>
-                          <FormattedMessage
-                            defaultMessage='Active'
-                            description='Tab text to view active versions under details tab
+                <SegmentedControlGroup
+                  value={this.state.stageFilter}
+                  onChange={(e) => this.handleStageFilterChange(e)}
+                >
+                  <SegmentedControlButton value={StageFilters.ALL}>
+                    <FormattedMessage
+                      defaultMessage='All'
+                      description={
+                        'Tab text to view all versions under details tab on' +
+                        ' the model view page'
+                      }
+                    />
+                  </SegmentedControlButton>
+                  <SegmentedControlButton value={StageFilters.ACTIVE}>
+                    <FormattedMessage
+                      defaultMessage='Active'
+                      description='Tab text to view active versions under details tab
                                on the model view page'
-                          />{' '}
-                          {this.getActiveVersionsCount()}
-                        </span>
-                      ),
-                      onClick: (e) => this.handleStageFilterChange(e),
-                      dataTestId: 'activeModelsToggleButton',
-                    },
-                  ]}
-                />
+                    />{' '}
+                    {this.getActiveVersionsCount()}
+                  </SegmentedControlButton>
+                </SegmentedControlGroup>
                 <Button
                   data-test-id='compareButton'
                   disabled={compareDisabled}
@@ -360,8 +361,8 @@ export class ModelViewImpl extends React.Component {
                        on the model view page'
                   />
                 </Button>
-              </Spacer>
-            </div>
+              </div>
+            </>
           }
           data-test-id='model-versions-section'
         >
@@ -375,6 +376,7 @@ export class ModelViewImpl extends React.Component {
 
         {/* Delete Model Dialog */}
         <Modal
+          data-testid='mlflow-input-modal'
           title={this.props.intl.formatMessage({
             defaultMessage: 'Delete Model',
             description: 'Title text for delete model modal on model view page',
@@ -412,11 +414,7 @@ export class ModelViewImpl extends React.Component {
   render() {
     const { model } = this.props;
     const modelName = model.name;
-    const title = (
-      <Spacer size='small' direction='horizontal'>
-        {modelName}
-      </Spacer>
-    );
+
     const breadcrumbs = [
       <Link to={modelListPageRoute}>
         <FormattedMessage
@@ -424,13 +422,10 @@ export class ModelViewImpl extends React.Component {
           description='Text for link back to model page under the header on the model view page'
         />
       </Link>,
-      <Link data-test-id='breadcrumbRegisteredModel' to={getModelPageRoute(modelName)}>
-        {modelName}
-      </Link>,
     ];
     return (
-      <div className='model-view-content'>
-        <PageHeader title={title} breadcrumbs={breadcrumbs}>
+      <div>
+        <PageHeader title={modelName} breadcrumbs={breadcrumbs}>
           <OverflowMenu menu={this.getOverflowMenuItems()} />
         </PageHeader>
         {this.renderMainPanel()}
@@ -445,5 +440,34 @@ const mapStateToProps = (state, ownProps) => {
   return { tags };
 };
 const mapDispatchToProps = { setRegisteredModelTagApi, deleteRegisteredModelTagApi };
+
+const styles = {
+  emailNotificationPreferenceDropdown: (theme) => ({ width: 300, marginBottom: theme.spacing.md }),
+  emailNotificationPreferenceTip: (theme) => ({
+    paddingLeft: theme.spacing.sm,
+    paddingRight: theme.spacing.sm,
+  }),
+  wrapper: (theme) => ({
+    '.collapsible-panel': {
+      marginBottom: theme.spacing.md,
+    },
+    /**
+     * This seems to be a best and most stable method to catch
+     * antd's collapsible section buttons without hacks
+     * and using class names.
+     */
+    'div[role="button"][aria-expanded]': {
+      height: theme.general.buttonHeight,
+    },
+  }),
+  editButton: (theme) => ({
+    marginLeft: theme.spacing.md,
+  }),
+  versionsTabButtons: (theme) => ({
+    display: 'flex',
+    gap: theme.spacing.md,
+    alignItems: 'center',
+  }),
+};
 
 export const ModelView = connect(mapStateToProps, mapDispatchToProps)(injectIntl(ModelViewImpl));

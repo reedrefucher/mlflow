@@ -1,175 +1,304 @@
 import React from 'react';
-import qs from 'qs';
 import { shallow } from 'enzyme';
 import { MemoryRouter as Router } from 'react-router-dom';
 
 import { ErrorCodes } from '../../common/constants';
 import { ExperimentPage, isNewRun, lifecycleFilterToRunViewType } from './ExperimentPage';
+import { ExperimentPagePersistedState } from '../sdk/MlflowLocalStorageMessages';
+import Utils from '../../common/utils/Utils';
 import ExperimentView from './ExperimentView';
-import { PermissionDeniedView } from './PermissionDeniedView';
 import { ViewType } from '../sdk/MlflowEnums';
-import { ErrorWrapper, getUUID } from '../../common/utils/ActionUtils';
+import { getUUID } from '../../common/utils/ActionUtils';
+import { ErrorWrapper } from '../../common/utils/ErrorWrapper';
 import { MAX_RUNS_IN_SEARCH_MODEL_VERSIONS_FILTER } from '../../model-registry/constants';
 import {
   ATTRIBUTE_COLUMN_SORT_KEY,
-  DETECT_NEW_RUNS_INTERVAL,
-  MAX_DETECT_NEW_RUNS_RESULTS,
-  PAGINATION_DEFAULT_STATE,
-  DEFAULT_ORDER_BY_KEY,
+  COLUMN_TYPES,
+  DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  DEFAULT_DIFF_SWITCH_SELECTED,
+  DEFAULT_LIFECYCLE_FILTER,
+  DEFAULT_MODEL_VERSION_FILTER,
   DEFAULT_ORDER_BY_ASC,
+  DEFAULT_ORDER_BY_KEY,
+  DEFAULT_START_TIME,
+  LIFECYCLE_FILTER,
+  MAX_DETECT_NEW_RUNS_RESULTS,
+  MODEL_VERSION_FILTER,
+  PAGINATION_DEFAULT_STATE,
+  POLL_INTERVAL,
+  MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME,
+  MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER,
 } from '../constants';
+import Fixtures from '../utils/test-utils/Fixtures';
 
-const BASE_PATH = '/experiments/17/s';
 const EXPERIMENT_ID = '17';
+const BASE_PATH = '/experiments/17/s';
+const MOCK_EXPERIMENT = Fixtures.createExperiment({ experiment_id: EXPERIMENT_ID, tags: [] });
 
 jest.useFakeTimers();
 
 let searchRunsApi;
 let getExperimentApi;
+let batchGetExperimentsApi;
 let loadMoreRunsApi;
 let searchModelVersionsApi;
 let searchForNewRuns;
+let setCompareExperiments;
 let history;
 let location;
+let dateNowSpy;
 
 beforeEach(() => {
+  dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => 0);
+  localStorage.clear();
   searchRunsApi = jest.fn(() => Promise.resolve());
-  getExperimentApi = jest.fn(() => Promise.resolve());
+  getExperimentApi = jest.fn(() => Promise.resolve({ action: { payload: {} } }));
   searchModelVersionsApi = jest.fn(() => Promise.resolve());
   loadMoreRunsApi = jest.fn(() => Promise.resolve());
   searchForNewRuns = jest.fn(() => Promise.resolve());
-  location = {};
+  setCompareExperiments = jest.fn(() => {});
+  location = {
+    pathname: '/',
+  };
+  history = {
+    push: jest.fn(),
+    location: {
+      pathname: BASE_PATH,
+      search: '',
+    },
+  };
+});
 
-  history = {};
-  history.location = {};
-  history.location.pathname = BASE_PATH;
-  history.location.search = '';
-  history.push = jest.fn();
+afterAll(() => {
+  dateNowSpy.mockRestore();
 });
 
 const getExperimentPageMock = (additionalProps) => {
   return shallow(
     <ExperimentPage
-      experimentId={EXPERIMENT_ID}
+      experiments={[MOCK_EXPERIMENT]}
+      experimentIds={[EXPERIMENT_ID]}
       searchRunsApi={searchRunsApi}
       getExperimentApi={getExperimentApi}
+      batchGetExperimentsApi={batchGetExperimentsApi}
       searchModelVersionsApi={searchModelVersionsApi}
       loadMoreRunsApi={loadMoreRunsApi}
       searchForNewRuns={searchForNewRuns}
+      setCompareExperiments={setCompareExperiments}
       history={history}
       location={location}
+      intl={{ formatMessage: () => {} }}
       {...additionalProps}
     />,
   );
 };
 
-function expectSearchState(historyEntry, state) {
-  const expectedPrefix = BASE_PATH + '?';
-  expect(historyEntry.startsWith(expectedPrefix)).toBe(true);
-  const search = historyEntry.substring(expectedPrefix.length);
-  const parsedHistory = qs.parse(search);
-  expect(parsedHistory).toEqual(state);
-}
+// eslint-disable-next-line no-unused-vars
+const getSearchRunsCall = () => {
+  return 1;
+};
 
-test('URL is empty for blank search', () => {
-  const wrapper = getExperimentPageMock();
-  wrapper.instance().onSearch('', 'Active', null, true, null);
-  expectSearchState(history.push.mock.calls[0][0], {});
-  const searchRunsCallParams = searchRunsApi.mock.calls[1][0];
+test('State and search params are correct for blank search', () => {
+  const wrapper = getExperimentPageMock({
+    location: {
+      search: '?searchInput=test',
+    },
+  });
+  wrapper.instance().onSearch({ searchInput: '' });
+
+  expect(wrapper.state().persistedState.searchInput).toEqual('');
+  expect(wrapper.state().persistedState.orderByKey).toEqual(DEFAULT_ORDER_BY_KEY);
+  expect(wrapper.state().persistedState.orderByAsc).toEqual(DEFAULT_ORDER_BY_ASC);
+  expect(wrapper.state().persistedState.lifecycleFilter).toEqual(DEFAULT_LIFECYCLE_FILTER);
+  expect(wrapper.state().persistedState.modelVersionFilter).toEqual(DEFAULT_MODEL_VERSION_FILTER);
+  expect(wrapper.state().persistedState.startTime).toEqual(DEFAULT_START_TIME);
+
+  const searchRunsCallParams = searchRunsApi.mock.calls[getSearchRunsCall()][0];
 
   expect(searchRunsCallParams.experimentIds).toEqual([EXPERIMENT_ID]);
   expect(searchRunsCallParams.filter).toEqual('');
   expect(searchRunsCallParams.runViewType).toEqual(ViewType.ACTIVE_ONLY);
-  expect(searchRunsCallParams.orderBy).toEqual([]);
+  expect(searchRunsCallParams.orderBy).toEqual(['attributes.start_time DESC']);
 });
 
-test('URL can encode a complete search', () => {
+test('State and search params are correct for complete search', () => {
   const wrapper = getExperimentPageMock();
-  wrapper.instance().onSearch('metrics.metric0 > 3', 'Deleted', null, true, null, 'ALL');
-  expectSearchState(history.push.mock.calls[0][0], {
-    search: 'metrics.metric0 > 3',
-    startTime: 'ALL',
+  wrapper.instance().onSearch({
+    searchInput: 'metrics.metric0 > 3',
+    orderByKey: 'test-key',
+    orderByAsc: true,
+    lifecycleFilter: 'Deleted',
+    modelVersionFilter: MODEL_VERSION_FILTER.WTIHOUT_MODEL_VERSIONS,
+    startTime: '1 Hour',
   });
-  const searchRunsCallParams = searchRunsApi.mock.calls[1][0];
+
+  expect(wrapper.state().persistedState.searchInput).toEqual('metrics.metric0 > 3');
+  expect(wrapper.state().persistedState.orderByKey).toEqual('test-key');
+  expect(wrapper.state().persistedState.orderByAsc).toEqual(true);
+  expect(wrapper.state().persistedState.lifecycleFilter).toEqual('Deleted');
+  expect(wrapper.state().persistedState.modelVersionFilter).toEqual(
+    MODEL_VERSION_FILTER.WTIHOUT_MODEL_VERSIONS,
+  );
+  expect(wrapper.state().persistedState.startTime).toEqual('1 Hour');
+
+  const searchRunsCallParams = searchRunsApi.mock.calls[getSearchRunsCall()][0];
   expect(searchRunsCallParams.filter).toEqual('metrics.metric0 > 3');
   expect(searchRunsCallParams.runViewType).toEqual(ViewType.DELETED_ONLY);
+  expect(searchRunsCallParams.orderBy).toEqual(['test-key ASC']);
 });
 
-test('URL can encode order_by', () => {
-  const wrapper = getExperimentPageMock();
-  wrapper.instance().onSearch('', 'Active', 'my_key', false, null);
-  expectSearchState(history.push.mock.calls[0][0], {
-    orderByKey: 'my_key',
-    orderByAsc: 'false',
-  });
-  const searchRunsCallParams = searchRunsApi.mock.calls[1][0];
-  expect(searchRunsCallParams.filter).toEqual('');
-  expect(searchRunsCallParams.orderBy).toEqual(['my_key DESC']);
-});
-
-test('Loading state without any URL params', () => {
+test('Loading state without any URL params and no snapshot', () => {
   const wrapper = getExperimentPageMock();
   const { state } = wrapper.instance();
   expect(state.persistedState.searchInput).toEqual('');
+  expect(state.persistedState.lifecycleFilter).toEqual(DEFAULT_LIFECYCLE_FILTER);
+  expect(state.persistedState.modelVersionFilter).toEqual(DEFAULT_MODEL_VERSION_FILTER);
   expect(state.persistedState.orderByKey).toBe(DEFAULT_ORDER_BY_KEY);
   expect(state.persistedState.orderByAsc).toEqual(DEFAULT_ORDER_BY_ASC);
+  expect(state.persistedState.startTime).toEqual(DEFAULT_START_TIME);
+  expect(state.persistedState.diffSwitchSelected).toEqual(DEFAULT_DIFF_SWITCH_SELECTED);
+  expect(state.persistedState.categorizedUncheckedKeys).toEqual(DEFAULT_CATEGORIZED_UNCHECKED_KEYS);
+  expect(state.persistedState.preSwitchCategorizedUncheckedKeys).toEqual(
+    DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  );
+  expect(state.persistedState.postSwitchCategorizedUncheckedKeys).toEqual(
+    DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  );
 });
 
-test('Loading state with all URL params', () => {
-  location.search = 'params=a&metrics=b&search=c&orderByKey=d&orderByAsc=false';
+test('Loading state with all URL params and no snapshot', () => {
+  location.search =
+    'searchInput=c&orderByKey=d&orderByAsc=false&startTime=LAST_HOUR' +
+    '&lifecycleFilter=lifecycle&modelVersionFilter=With%20Model%20Versions' +
+    '&diffSwitchSelected=true' +
+    '&categorizedUncheckedKeys%5Battributes%5D%5B0%5D=a1' +
+    '&categorizedUncheckedKeys%5Bparams%5D%5B0%5D=p1' +
+    '&categorizedUncheckedKeys%5Bmetrics%5D%5B0%5D=m1' +
+    '&categorizedUncheckedKeys%5Btags%5D%5B0%5D=t1' +
+    '&preSwitchCategorizedUncheckedKeys%5Battributes%5D%5B0%5D=a2' +
+    '&preSwitchCategorizedUncheckedKeys%5Bparams%5D%5B0%5D=p2' +
+    '&preSwitchCategorizedUncheckedKeys%5Bmetrics%5D%5B0%5D=m2' +
+    '&preSwitchCategorizedUncheckedKeys%5Btags%5D%5B0%5D=t2' +
+    '&postSwitchCategorizedUncheckedKeys%5Battributes%5D%5B0%5D=a3' +
+    '&postSwitchCategorizedUncheckedKeys%5Bparams%5D%5B0%5D=p3' +
+    '&postSwitchCategorizedUncheckedKeys%5Bmetrics%5D%5B0%5D=m3' +
+    '&postSwitchCategorizedUncheckedKeys%5Btags%5D%5B0%5D=t3';
+
   const wrapper = getExperimentPageMock();
   const { state } = wrapper.instance();
   expect(state.persistedState.searchInput).toEqual('c');
+  expect(state.persistedState.lifecycleFilter).toEqual('lifecycle');
+  expect(state.persistedState.modelVersionFilter).toEqual('With Model Versions');
   expect(state.persistedState.orderByKey).toEqual('d');
   expect(state.persistedState.orderByAsc).toEqual(false);
+  expect(state.persistedState.startTime).toEqual('LAST_HOUR');
+  expect(state.persistedState.diffSwitchSelected).toEqual(true);
+  expect(state.persistedState.categorizedUncheckedKeys).toEqual({
+    [COLUMN_TYPES.ATTRIBUTES]: ['a1'],
+    [COLUMN_TYPES.PARAMS]: ['p1'],
+    [COLUMN_TYPES.METRICS]: ['m1'],
+    [COLUMN_TYPES.TAGS]: ['t1'],
+  });
+  expect(state.persistedState.preSwitchCategorizedUncheckedKeys).toEqual({
+    [COLUMN_TYPES.ATTRIBUTES]: ['a2'],
+    [COLUMN_TYPES.PARAMS]: ['p2'],
+    [COLUMN_TYPES.METRICS]: ['m2'],
+    [COLUMN_TYPES.TAGS]: ['t2'],
+  });
+  expect(state.persistedState.postSwitchCategorizedUncheckedKeys).toEqual({
+    [COLUMN_TYPES.ATTRIBUTES]: ['a3'],
+    [COLUMN_TYPES.PARAMS]: ['p3'],
+    [COLUMN_TYPES.METRICS]: ['m3'],
+    [COLUMN_TYPES.TAGS]: ['t3'],
+  });
+});
+
+test('onClear clears all parameters', () => {
+  const wrapper = getExperimentPageMock();
+  const instance = wrapper.instance();
+  const updateUrlWithViewStateSpy = jest.fn();
+  instance.updateUrlWithViewState = updateUrlWithViewStateSpy;
+  instance.setState({
+    persistedState: new ExperimentPagePersistedState({
+      searchInput: 'testing',
+      orderByKey: 'test-key',
+      orderByAsc: false,
+      startTime: 'HOUR',
+      lifecycleFilter: LIFECYCLE_FILTER.DELETED,
+      modelVersionFilter: MODEL_VERSION_FILTER.WITH_MODEL_VERSIONS,
+      categorizedUncheckedKeys: {},
+      diffSwitchSelected: true,
+      preSwitchCategorizedUncheckedKeys: {},
+      postSwitchCategorizedUncheckedKeys: {},
+    }).toJSON(),
+  });
+
+  instance.onClear();
+  const { state } = instance;
+  expect(updateUrlWithViewStateSpy).toHaveBeenCalledTimes(1);
+  expect(state.persistedState.searchInput).toEqual('');
+  expect(state.persistedState.lifecycleFilter).toEqual(DEFAULT_LIFECYCLE_FILTER);
+  expect(state.persistedState.modelVersionFilter).toEqual(DEFAULT_MODEL_VERSION_FILTER);
+  expect(state.persistedState.orderByKey).toBe(DEFAULT_ORDER_BY_KEY);
+  expect(state.persistedState.orderByAsc).toEqual(DEFAULT_ORDER_BY_ASC);
+  expect(state.persistedState.startTime).toEqual(DEFAULT_START_TIME);
+  expect(state.persistedState.diffSwitchSelected).toEqual(DEFAULT_DIFF_SWITCH_SELECTED);
+  expect(state.persistedState.categorizedUncheckedKeys).toEqual(DEFAULT_CATEGORIZED_UNCHECKED_KEYS);
+  expect(state.persistedState.preSwitchCategorizedUncheckedKeys).toEqual(
+    DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  );
+  expect(state.persistedState.postSwitchCategorizedUncheckedKeys).toEqual(
+    DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  );
 });
 
 test('should render permission denied view when getExperiment yields permission error', () => {
   const experimentPageInstance = getExperimentPageMock().instance();
   experimentPageInstance.setState({
-    getExperimentRequestId: getUUID(),
+    getExperimentRequestIds: [getUUID()],
     searchRunsRequestId: getUUID(),
   });
   const errorMessage = 'Access Denied';
-  const responseErrorWrapper = new ErrorWrapper({
-    responseText: `{"error_code": "${ErrorCodes.PERMISSION_DENIED}", "message": "${errorMessage}"}`,
-  });
+  const responseErrorWrapper = new ErrorWrapper(
+    `{"error_code": "${ErrorCodes.PERMISSION_DENIED}", "message": "${errorMessage}"}`,
+    403,
+  );
   const searchRunsErrorRequest = {
     id: experimentPageInstance.state.searchRunsRequestId,
     active: false,
     error: responseErrorWrapper,
   };
   const getExperimentErrorRequest = {
-    id: experimentPageInstance.state.getExperimentRequestId,
+    id: experimentPageInstance.state.getExperimentRequestIds[0],
     active: false,
     error: responseErrorWrapper,
   };
-  const experimentViewInstance = shallow(
+  const wrapper = shallow(
     experimentPageInstance.renderExperimentView(false, true, [
       searchRunsErrorRequest,
       getExperimentErrorRequest,
     ]),
-  ).instance();
-  expect(experimentViewInstance).toBeInstanceOf(PermissionDeniedView);
-  expect(experimentViewInstance.props.errorMessage).toEqual(errorMessage);
+  );
+  expect(wrapper.find('[data-testid="error-message"]').text()).toEqual(errorMessage);
 });
 
 test('should render experiment view when search error occurs', () => {
   const experimentPageInstance = getExperimentPageMock().instance();
   experimentPageInstance.setState({
-    getExperimentRequestId: getUUID(),
+    getExperimentRequestIds: [getUUID()],
     searchRunsRequestId: getUUID(),
   });
-  const responseErrorWrapper = new ErrorWrapper({
-    responseText: `{"error_code": "${ErrorCodes.INVALID_PARAMETER_VALUE}", "message": "Invalid"}`,
-  });
+  const responseErrorWrapper = new ErrorWrapper(
+    `{"error_code": "${ErrorCodes.INVALID_PARAMETER_VALUE}", "message": "Invalid"}`,
+    400,
+  );
   const searchRunsErrorRequest = {
     id: experimentPageInstance.state.searchRunsRequestId,
     active: false,
     error: responseErrorWrapper,
   };
   const getExperimentErrorRequest = {
-    id: experimentPageInstance.state.getExperimentRequestId,
+    id: experimentPageInstance.state.getExperimentRequestIds[0],
     active: false,
   };
   const renderedView = shallow(
@@ -183,10 +312,13 @@ test('should render experiment view when search error occurs', () => {
   expect(renderedView.find(ExperimentView)).toHaveLength(1);
 });
 
-test('should update next page token initially', () => {
+test('should update next page token initially', async () => {
   const promise = Promise.resolve({ value: { next_page_token: 'token_1' } });
+  getExperimentApi = jest.fn(() =>
+    Promise.resolve({ action: { payload: { experiment: MOCK_EXPERIMENT } } }),
+  );
   searchRunsApi = jest.fn(() => promise);
-  const wrapper = getExperimentPageMock();
+  const wrapper = await getExperimentPageMock();
   const instance = wrapper.instance();
   return promise.then(() => expect(instance.state.nextPageToken).toBe('token_1'));
 });
@@ -200,12 +332,12 @@ test('should update next page token after load-more', () => {
   return promise.then(() => expect(instance.state.nextPageToken).toBe('token_1'));
 });
 
-test('should update next page token to null when load-more response has no token', () => {
+test('should update next page token to null when load-more response has no token', async () => {
   const promise1 = Promise.resolve({ value: { next_page_token: 'token_1' } });
   const promise2 = Promise.resolve({ value: {} });
   searchRunsApi = jest.fn(() => promise1);
   loadMoreRunsApi = jest.fn(() => promise2);
-  const wrapper = getExperimentPageMock();
+  const wrapper = await getExperimentPageMock();
   const instance = wrapper.instance();
   instance.handleLoadMoreRuns();
   return Promise.all([promise1, promise2]).then(() =>
@@ -214,7 +346,7 @@ test('should update next page token to null when load-more response has no token
 });
 
 test('should set state to default values on promise rejection when loading more', () => {
-  loadMoreRunsApi = jest.fn(() => Promise.reject());
+  loadMoreRunsApi = jest.fn(() => Promise.reject(new Error('loadMoreRuns rejected')));
   const wrapper = getExperimentPageMock();
   const instance = wrapper.instance();
   return Promise.resolve(instance.handleLoadMoreRuns()).then(() => {
@@ -227,10 +359,9 @@ test('should set state to default values on promise rejection when loading more'
 });
 
 test('should set state to default values on promise rejection onSearch', () => {
-  searchRunsApi = jest.fn(() => Promise.reject());
   const wrapper = getExperimentPageMock();
   const instance = wrapper.instance();
-  return Promise.resolve(instance.onSearch()).then(() => {
+  return Promise.resolve(instance.onSearch({})).then(() => {
     expect(instance.state.nextPageToken).toBe(PAGINATION_DEFAULT_STATE.nextPageToken);
     expect(instance.state.numRunsFromLatestSearch).toBe(
       PAGINATION_DEFAULT_STATE.numRunsFromLatestSearch,
@@ -359,6 +490,7 @@ test('handleGettingRuns chain functions should not change response', () => {
   expect(instance.updateNextPageToken(response)).toEqual(response);
   expect(instance.updateNumRunsFromLatestSearch(response)).toEqual(response);
   expect(instance.fetchModelVersionsForRuns(response)).toEqual(response);
+  expect(instance.updateCachedStartDate(response)).toEqual(response);
 });
 
 describe('updateNextPageToken', () => {
@@ -378,6 +510,68 @@ describe('updateNextPageToken', () => {
     instance.updateNextPageToken({});
     expect(instance.state.nextPageToken).toBe(null);
     expect(instance.state.loadingMore).toBe(false);
+  });
+});
+
+describe('updateCachedStartDate', () => {
+  it('should set cachedStartTime when there is next page token', () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+
+    const responseWithToken = { value: { next_page_token: 'token' } };
+    const startDateFilter = 'attributes.start_time >= 100';
+
+    instance.updateCachedStartDate(responseWithToken, startDateFilter);
+    expect(instance.state.cachedStartTime).toBe(startDateFilter);
+  });
+
+  it('should set cachedStartTime to null when no next page token has been received', () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+
+    const responseWithToken = { value: { next_page_token: null } };
+    const startDateFilter = 'attributes.start_time >= 100';
+
+    instance.updateCachedStartDate(responseWithToken, startDateFilter);
+    expect(instance.state.cachedStartTime).toBe(null);
+  });
+});
+
+describe('using cached startTime when requesting subsequent pages', () => {
+  it('should use cached start time when fetching next page', async () => {
+    let startTimeFilter;
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+    instance.setState({
+      persistedState: new ExperimentPagePersistedState({
+        startTime: 'LAST_24_HOURS',
+      }).toJSON(),
+    });
+
+    const mockFirstRequestFn = jest.fn().mockImplementation(({ filter }) => {
+      startTimeFilter = filter;
+      return Promise.resolve({ value: { next_page_token: 'TOKEN' } });
+    });
+
+    await instance.handleGettingRuns(mockFirstRequestFn, instance.searchRunsApi);
+
+    expect(mockFirstRequestFn).toBeCalledWith(
+      expect.objectContaining({
+        filter: expect.stringContaining('attributes.start_time'),
+      }),
+    );
+
+    jest.advanceTimersByTime(5000);
+
+    const mockNextPageRequestFn = jest.fn().mockResolvedValue({});
+
+    await instance.handleGettingRuns(mockNextPageRequestFn, instance.searchRunsApi);
+
+    expect(mockNextPageRequestFn).toBeCalledWith(
+      expect.objectContaining({
+        filter: startTimeFilter,
+      }),
+    );
   });
 });
 
@@ -450,6 +644,7 @@ describe('handleGettingRuns', () => {
   it('should call updateNextPageToken, updateNumRunsFromLatestSearch, fetchModelVersionsForRuns', () => {
     const wrapper = getExperimentPageMock();
     const instance = wrapper.instance();
+    instance.updateCachedStartDate = jest.fn();
     instance.updateNextPageToken = jest.fn();
     instance.updateNumRunsFromLatestSearch = jest.fn();
     instance.fetchModelVersionsForRuns = jest.fn();
@@ -457,6 +652,7 @@ describe('handleGettingRuns', () => {
     return Promise.resolve(
       instance.handleGettingRuns(() => Promise.resolve(), instance.searchRunsApi),
     ).then(() => {
+      expect(instance.updateCachedStartDate).toHaveBeenCalled();
       expect(instance.updateNextPageToken).toHaveBeenCalled();
       expect(instance.updateNumRunsFromLatestSearch).toHaveBeenCalled();
       expect(instance.fetchModelVersionsForRuns).toHaveBeenCalled();
@@ -469,80 +665,94 @@ test('lifecycleFilterToRunViewType', () => {
   expect(lifecycleFilterToRunViewType('Deleted')).toBe('DELETED_ONLY');
 });
 
-describe('detectNewRuns', () => {
-  describe('refresh behaviour', () => {
-    test('Should refresh once after DETECT_NEW_RUNS_INTERVAL', () => {
-      getExperimentPageMock();
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL - 1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(1);
+describe('pollInfo', () => {
+  test('Should be called every POLL_INTERVAL', () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollInfo = jest.fn();
+
+    jest.advanceTimersByTime(POLL_INTERVAL - 1);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(0);
+    jest.advanceTimersByTime(1);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(2);
+  });
+
+  test('Should not be called after unmount', async () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+    instance.pollInfo = jest.fn();
+    await instance.pollInfo();
+
+    wrapper.unmount();
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(POLL_INTERVAL * 100);
+    expect(instance.pollInfo).toHaveBeenCalledTimes(1);
+  });
+
+  test('pollNewRuns is called if newRuns is true', async () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollNewRuns = jest.fn();
+
+    expect(instance.state.pollingState.newRuns).toEqual(true);
+    await instance.pollInfo();
+    expect(instance.pollNewRuns).toHaveBeenCalledTimes(1);
+  });
+
+  test('pollNewRuns is not called if newRuns is false', () => {
+    const instance = getExperimentPageMock().instance();
+    instance.pollNewRuns = jest.fn();
+
+    instance.setState(
+      {
+        pollingState: {
+          newRuns: false,
+        },
+      },
+      async () => {
+        await instance.pollInfo();
+        expect(instance.pollNewRuns).toHaveBeenCalledTimes(0);
+      },
+    );
+  });
+});
+
+describe('pollNewRuns', () => {
+  describe('newRuns state', () => {
+    const maxNewRuns = [];
+    for (let i = 0; i < MAX_DETECT_NEW_RUNS_RESULTS; i++) {
+      maxNewRuns.push({ info: { start_time: Date.now() + 10000 } });
+    }
+
+    test('Should set pollingState.newRuns to false if there are already max new runs', async () => {
+      const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
+      const instance = getExperimentPageMock({
+        searchForNewRuns: mockSearchForNewRuns,
+      }).instance();
+
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(0);
+      await instance.pollNewRuns();
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
+      expect(instance.state.pollingState.newRuns).toEqual(false);
+      jest.advanceTimersByTime(POLL_INTERVAL * 100);
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
     });
 
-    test('Should refresh every DETECT_NEW_RUNS_INTERVAL', () => {
-      getExperimentPageMock();
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL - 1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(1);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(1);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(2);
-    });
+    test('Should set pollingState.newRuns to true if a new search is triggered', async () => {
+      const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
+      const instance = getExperimentPageMock({
+        searchForNewRuns: mockSearchForNewRuns,
+      }).instance();
 
-    test('Should not keep refreshing after unmount', () => {
-      const mock = getExperimentPageMock();
+      await instance.pollNewRuns();
+      expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
+      expect(instance.state.pollingState.newRuns).toEqual(false);
 
-      mock.unmount();
-
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-      jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-      expect(searchForNewRuns).toHaveBeenCalledTimes(0);
-    });
-
-    describe('Interval clearing behaviour', () => {
-      const maxNewRuns = [];
-      for (let i = 0; i < MAX_DETECT_NEW_RUNS_RESULTS; i++) {
-        maxNewRuns.push({ info: { start_time: Date.now() + 10000 } });
-      }
-
-      test('Should stop polling if there are already max new runs', async () => {
-        const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
-
-        const instance = getExperimentPageMock({
-          searchForNewRuns: mockSearchForNewRuns,
-        }).instance();
-
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(0);
-        await instance.detectNewRuns();
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-        expect(instance.detectNewRunsTimer).toEqual(null);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-      });
-
-      test('Should resume polling if a new search is triggered', async () => {
-        const mockSearchForNewRuns = jest.fn(() => Promise.resolve({ runs: maxNewRuns }));
-
-        const instance = getExperimentPageMock({
-          searchForNewRuns: mockSearchForNewRuns,
-        }).instance();
-
-        await instance.detectNewRuns();
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-        expect(instance.detectNewRunsTimer).toEqual(null);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL * 100);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(1);
-
-        await instance.onSearch();
-
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(2);
-        jest.advanceTimersByTime(DETECT_NEW_RUNS_INTERVAL);
-        expect(mockSearchForNewRuns).toHaveBeenCalledTimes(3);
-      });
+      await instance.onSearch();
+      expect(instance.state.pollingState.newRuns).toEqual(true);
     });
   });
 
@@ -557,7 +767,7 @@ describe('detectNewRuns', () => {
         searchForNewRuns: () => Promise.resolve({ runs: [] }),
       }).instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(0);
     });
 
@@ -588,14 +798,14 @@ describe('detectNewRuns', () => {
         searchForNewRuns: mockSearchForNewRuns,
       }).instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(2);
     });
 
     test('Should not explode if no runs', async () => {
       const instance = getExperimentPageMock().instance();
 
-      await instance.detectNewRuns();
+      await instance.pollNewRuns();
       expect(instance.state.numberOfNewRuns).toEqual(0);
     });
   });
@@ -670,36 +880,36 @@ describe('startTime select filters out the experiment runs correctly', () => {
 
     instance.setState(
       {
-        persistedState: {
+        persistedState: new ExperimentPagePersistedState({
           startTime: '',
-        },
+        }).toJSON(),
       },
       () => expect(instance.getStartTimeExpr()).toBe(null),
     );
 
     instance.setState(
       {
-        persistedState: {
+        persistedState: new ExperimentPagePersistedState({
           startTime: undefined,
-        },
+        }).toJSON(),
       },
       () => expect(instance.getStartTimeExpr()).toBe(null),
     );
 
     instance.setState(
       {
-        persistedState: {
+        persistedState: new ExperimentPagePersistedState({
           startTime: 'ALL',
-        },
+        }).toJSON(),
       },
       () => expect(instance.getStartTimeExpr()).toBe(null),
     );
 
     instance.setState(
       {
-        persistedState: {
+        persistedState: new ExperimentPagePersistedState({
           startTime: 'LAST_24_HOURS',
-        },
+        }).toJSON(),
       },
       () => expect(instance.getStartTimeExpr()).toMatch('attributes.start_time'),
     );
@@ -778,5 +988,371 @@ describe('startTime select filters out the experiment runs correctly', () => {
         );
       },
     );
+  });
+});
+
+function expectSearchState(historyEntry, searchQueryParams) {
+  const expectedPrefix = BASE_PATH + '?';
+  expect(historyEntry.startsWith(expectedPrefix)).toBe(true);
+  const search = historyEntry.substring(expectedPrefix.length);
+  expect(Utils.getSearchParamsFromUrl(search)).toEqual(searchQueryParams);
+}
+
+describe('updateUrlWithViewState', () => {
+  const emptyCategorizedUncheckedKeys = {
+    [COLUMN_TYPES.ATTRIBUTES]: [''],
+    [COLUMN_TYPES.PARAMS]: [''],
+    [COLUMN_TYPES.METRICS]: [''],
+    [COLUMN_TYPES.TAGS]: [''],
+  };
+  const defaultParameters = {
+    searchInput: '',
+    lifecycleFilter: DEFAULT_LIFECYCLE_FILTER,
+    modelVersionFilter: DEFAULT_MODEL_VERSION_FILTER,
+    orderByKey: DEFAULT_ORDER_BY_KEY,
+    orderByAsc: DEFAULT_ORDER_BY_ASC,
+    startTime: DEFAULT_START_TIME,
+    categorizedUncheckedKeys: DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+    diffSwitchSelected: DEFAULT_DIFF_SWITCH_SELECTED,
+    preSwitchCategorizedUncheckedKeys: DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+    postSwitchCategorizedUncheckedKeys: DEFAULT_CATEGORIZED_UNCHECKED_KEYS,
+  };
+  let wrapper;
+  let instance;
+  beforeEach(() => {
+    localStorage.clear();
+    wrapper = getExperimentPageMock({
+      history: history,
+    });
+    instance = wrapper.instance();
+  });
+
+  test('updateUrlWithViewState updates URL correctly with default params', () => {
+    const {
+      searchInput,
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      diffSwitchSelected,
+    } = defaultParameters;
+
+    instance.updateUrlWithViewState();
+
+    expectSearchState(history.push.mock.calls[0][0], {
+      searchInput,
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      categorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      diffSwitchSelected,
+      preSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      postSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+    });
+  });
+
+  test('updateUrlWithViewState updates URL correctly with orderByAsc true', () => {
+    instance.setState({
+      persistedState: new ExperimentPagePersistedState({
+        orderByAsc: true,
+      }).toJSON(),
+    });
+
+    const {
+      searchInput,
+      orderByKey,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      diffSwitchSelected,
+    } = defaultParameters;
+
+    instance.updateUrlWithViewState();
+
+    expectSearchState(history.push.mock.calls[0][0], {
+      searchInput,
+      orderByKey,
+      orderByAsc: true,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      categorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      diffSwitchSelected,
+      preSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      postSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+    });
+  });
+
+  test('updateUrlWithViewState updates URL correctly with lifecycle & model filter', () => {
+    instance.setState({
+      persistedState: new ExperimentPagePersistedState({
+        lifecycleFilter: 'life',
+        modelVersionFilter: 'model',
+      }).toJSON(),
+    });
+
+    const { searchInput, orderByKey, orderByAsc, startTime, diffSwitchSelected } =
+      defaultParameters;
+
+    instance.updateUrlWithViewState();
+
+    expectSearchState(history.push.mock.calls[0][0], {
+      searchInput,
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter: 'life',
+      modelVersionFilter: 'model',
+      categorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      diffSwitchSelected,
+      preSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      postSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+    });
+  });
+
+  test('updateUrlWithViewState updates URL correctly with searchInput', () => {
+    instance.setState({
+      persistedState: new ExperimentPagePersistedState({
+        searchInput: 'search-value',
+      }).toJSON(),
+    });
+
+    const {
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      diffSwitchSelected,
+    } = defaultParameters;
+
+    instance.updateUrlWithViewState();
+
+    expectSearchState(history.push.mock.calls[0][0], {
+      searchInput: 'search-value',
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      categorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      diffSwitchSelected,
+      preSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+      postSwitchCategorizedUncheckedKeys: emptyCategorizedUncheckedKeys,
+    });
+  });
+
+  test('updateUrlWithViewState updates URL correctly with diffSwitchSelected true', () => {
+    const categorizedUncheckedKeys = {
+      [COLUMN_TYPES.ATTRIBUTES]: ['a1'],
+      [COLUMN_TYPES.PARAMS]: ['p1'],
+      [COLUMN_TYPES.METRICS]: ['m1'],
+      [COLUMN_TYPES.TAGS]: ['t1'],
+    };
+
+    const preSwitchCategorizedUncheckedKeys = {
+      [COLUMN_TYPES.ATTRIBUTES]: ['a2'],
+      [COLUMN_TYPES.PARAMS]: ['p2'],
+      [COLUMN_TYPES.METRICS]: ['m2'],
+      [COLUMN_TYPES.TAGS]: ['t2'],
+    };
+
+    const postSwitchCategorizedUncheckedKeys = {
+      [COLUMN_TYPES.ATTRIBUTES]: ['a3'],
+      [COLUMN_TYPES.PARAMS]: ['p3'],
+      [COLUMN_TYPES.METRICS]: ['m3'],
+      [COLUMN_TYPES.TAGS]: ['t3'],
+    };
+
+    instance.setState({
+      persistedState: new ExperimentPagePersistedState({
+        diffSwitchSelected: true,
+        categorizedUncheckedKeys: categorizedUncheckedKeys,
+        preSwitchCategorizedUncheckedKeys: preSwitchCategorizedUncheckedKeys,
+        postSwitchCategorizedUncheckedKeys: postSwitchCategorizedUncheckedKeys,
+      }).toJSON(),
+    });
+
+    const { searchInput, orderByKey, orderByAsc, startTime, lifecycleFilter, modelVersionFilter } =
+      defaultParameters;
+
+    instance.updateUrlWithViewState();
+
+    expectSearchState(history.push.mock.calls[0][0], {
+      searchInput,
+      orderByKey,
+      orderByAsc,
+      startTime,
+      lifecycleFilter,
+      modelVersionFilter,
+      categorizedUncheckedKeys: categorizedUncheckedKeys,
+      diffSwitchSelected: true,
+      preSwitchCategorizedUncheckedKeys: preSwitchCategorizedUncheckedKeys,
+      postSwitchCategorizedUncheckedKeys: postSwitchCategorizedUncheckedKeys,
+    });
+  });
+});
+
+describe('filtersDidUpdate', () => {
+  let wrapper;
+  let instance;
+  let prevState;
+  beforeEach(() => {
+    localStorage.clear();
+    wrapper = getExperimentPageMock();
+    instance = wrapper.instance();
+    prevState = {
+      persistedState: {
+        searchInput: '',
+        orderByKey: DEFAULT_ORDER_BY_KEY,
+        orderByAsc: DEFAULT_ORDER_BY_ASC,
+        startTime: DEFAULT_START_TIME,
+        lifecycleFilter: DEFAULT_LIFECYCLE_FILTER,
+        modelVersionFilter: DEFAULT_MODEL_VERSION_FILTER,
+      },
+    };
+  });
+  test('filtersDidUpdate returns true when filters were not updated', () => {
+    expect(instance.filtersDidUpdate(prevState)).toEqual(false);
+  });
+
+  test('filtersDidUpdate returns false when searchinput was updated', () => {
+    prevState.persistedState.searchInput = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+
+  test('filtersDidUpdate returns false when orderByKey was updated', () => {
+    prevState.persistedState.orderByKey = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+
+  test('filtersDidUpdate returns false when orderByAsc was updated', () => {
+    prevState.persistedState.orderByAsc = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+
+  test('filtersDidUpdate returns false when startTime was updated', () => {
+    prevState.persistedState.startTime = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+
+  test('filtersDidUpdate returns false when lifecycleFilter was updated', () => {
+    prevState.persistedState.lifecycleFilter = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+
+  test('filtersDidUpdate returns false when modelVersionFilter was updated', () => {
+    prevState.persistedState.modelVersionFilter = 'updated';
+    expect(instance.filtersDidUpdate(prevState)).toEqual(true);
+  });
+});
+
+describe('handleColumnSelectionCheck', () => {
+  test('handleColumnSelectionCheck sets state correctly', () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+    const updateUrlWithViewStateSpy = jest.fn();
+    const snapshotComponentStateSpy = jest.fn();
+    instance.updateUrlWithViewState = updateUrlWithViewStateSpy;
+    instance.snapshotComponentState = snapshotComponentStateSpy;
+    instance.handleColumnSelectionCheck({
+      key: 'value',
+    });
+    expect(instance.state.persistedState.categorizedUncheckedKeys).toEqual({
+      key: 'value',
+    });
+    expect(updateUrlWithViewStateSpy).toHaveBeenCalledTimes(1);
+    expect(snapshotComponentStateSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('handleDiffSwitchChange', () => {
+  test('handleDiffSwitchChange sets state correctly', () => {
+    const wrapper = getExperimentPageMock();
+    const instance = wrapper.instance();
+    const updateUrlWithViewStateSpy = jest.fn();
+    const snapshotComponentStateSpy = jest.fn();
+    instance.updateUrlWithViewState = updateUrlWithViewStateSpy;
+    instance.snapshotComponentState = snapshotComponentStateSpy;
+
+    instance.handleDiffSwitchChange({
+      categorizedUncheckedKeys: {
+        key1: 'value1',
+      },
+      preSwitchCategorizedUncheckedKeys: {
+        key2: 'value2',
+      },
+      postSwitchCategorizedUncheckedKeys: {
+        key3: 'value3',
+      },
+    });
+
+    expect(instance.state.persistedState.categorizedUncheckedKeys).toEqual({
+      key1: 'value1',
+    });
+    expect(instance.state.persistedState.preSwitchCategorizedUncheckedKeys).toEqual({
+      key2: 'value2',
+    });
+    expect(instance.state.persistedState.postSwitchCategorizedUncheckedKeys).toEqual({
+      key3: 'value3',
+    });
+    expect(instance.state.persistedState.diffSwitchSelected).toEqual(true);
+    expect(updateUrlWithViewStateSpy).toHaveBeenCalledTimes(1);
+    expect(snapshotComponentStateSpy).toHaveBeenCalledTimes(1);
+
+    instance.handleDiffSwitchChange({
+      categorizedUncheckedKeys: {
+        key4: 'value4',
+      },
+    });
+
+    expect(instance.state.persistedState.categorizedUncheckedKeys).toEqual({
+      key4: 'value4',
+    });
+    expect(instance.state.persistedState.preSwitchCategorizedUncheckedKeys).toEqual({
+      key2: 'value2',
+    });
+    expect(instance.state.persistedState.postSwitchCategorizedUncheckedKeys).toEqual({
+      key3: 'value3',
+    });
+    expect(instance.state.persistedState.diffSwitchSelected).toEqual(false);
+    expect(updateUrlWithViewStateSpy).toHaveBeenCalledTimes(2);
+    expect(snapshotComponentStateSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('sortRunsByPrimaryMetric', () => {
+  test('sortRunsByPrimaryMetric sets state correctly', () => {
+    const experiment = Fixtures.createExperiment({
+      experiment_id: EXPERIMENT_ID,
+      tags: [
+        {
+          key: MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME,
+          value: 'metric1',
+        },
+        {
+          key: MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER,
+          value: 'True',
+        },
+      ],
+    });
+    const wrapper = getExperimentPageMock({
+      getExperimentApi: () =>
+        Promise.resolve({
+          action: {
+            payload: {
+              experiment,
+            },
+          },
+        }),
+    });
+    const instance = wrapper.instance();
+    return instance.loadData().then(() => {
+      expect(instance.state.persistedState.orderByKey).toEqual('metrics.`metric1`');
+      expect(instance.state.persistedState.orderByAsc).toEqual(false);
+    });
   });
 });

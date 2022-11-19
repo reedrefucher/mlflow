@@ -11,7 +11,7 @@ from mlflow.store.artifact.databricks_artifact_repo import DatabricksArtifactRep
 
 
 @pytest.mark.parametrize(
-    "artifact_uri, uri_at_init",
+    ("artifact_uri", "uri_at_init"),
     [("dbfs:/path", "file:///dbfs/path"), ("dbfs://databricks/path", "file:///dbfs/path")],
 )
 def test_dbfs_artifact_repo_factory_local_repo(artifact_uri, uri_at_init):
@@ -80,5 +80,5 @@ def test_dbfs_artifact_repo_factory_acled_paths(artifact_uri):
     "artifact_uri", [("notdbfs:/path"), ("dbfs://some:where@notdatabricks/path")]
 )
 def test_dbfs_artifact_repo_factory_errors(artifact_uri):
-    with pytest.raises(MlflowException):
+    with pytest.raises(MlflowException, match="DBFS URI must be of the form dbfs"):
         dbfs_artifact_repo_factory(artifact_uri)

@@ -141,9 +141,8 @@ def test_artifacts_are_logged_to_and_downloaded_from_repo_subdirectory_successfu
 def test_log_artifact_throws_exception_for_invalid_artifact_paths(local_artifact_repo):
     with TempDir() as local_dir:
         for bad_artifact_path in ["/", "//", "/tmp", "/bad_path", ".", "../terrible_path"]:
-            with pytest.raises(MlflowException) as exc_info:
+            with pytest.raises(MlflowException, match="Invalid artifact path"):
                 local_artifact_repo.log_artifact(local_dir.path(), bad_artifact_path)
-            assert "Invalid artifact path" in str(exc_info)
 
 
 def test_logging_directory_of_artifacts_produces_expected_repo_contents(local_artifact_repo):
@@ -187,3 +186,7 @@ def test_delete_artifacts(local_artifact_repo):
         assert os.path.exists(os.path.join(local_artifact_repo._artifact_dir, "b.txt"))
         local_artifact_repo.delete_artifacts()
         assert not os.path.exists(os.path.join(local_artifact_repo._artifact_dir))
+
+
+def test_delete_artifacts_with_nonexistent_path_succeeds(local_artifact_repo):
+    local_artifact_repo.delete_artifacts("nonexistent")

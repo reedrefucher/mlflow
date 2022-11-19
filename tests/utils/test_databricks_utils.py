@@ -1,16 +1,21 @@
+import os
 import sys
 from unittest import mock
 import pytest
 
+from mlflow.exceptions import MlflowException
 from mlflow.utils import databricks_utils
-from databricks_cli.configure.provider import DatabricksConfig
-
 from mlflow.utils.databricks_utils import (
     get_workspace_info_from_dbutils,
     get_workspace_info_from_databricks_secrets,
     is_databricks_default_tracking_uri,
+    is_running_in_ipython_environment,
 )
 from mlflow.utils.uri import construct_db_uri_from_profile
+
+from databricks_cli.configure.provider import DatabricksConfig
+
+from tests.helper_functions import mock_method_chain
 
 
 def test_no_throw():
@@ -19,6 +24,7 @@ def test_no_throw():
     None.
     """
     assert not databricks_utils.is_in_databricks_notebook()
+    assert not databricks_utils.is_in_databricks_repo_notebook()
     assert not databricks_utils.is_in_databricks_job()
     assert not databricks_utils.is_dbfs_fuse_available()
     assert not databricks_utils.is_in_databricks_runtime()
@@ -79,14 +85,14 @@ def test_databricks_registry_profile(ProfileConfigProvider):
 @mock.patch("databricks_cli.configure.provider.get_config")
 def test_databricks_empty_uri(get_config):
     get_config.return_value = None
-    with pytest.raises(Exception):
+    with pytest.raises(MlflowException, match="Got malformed Databricks CLI profile"):
         databricks_utils.get_databricks_host_creds("")
 
 
 @mock.patch("databricks_cli.configure.provider.get_config")
 def test_databricks_single_slash_in_uri_scheme_throws(get_config):
     get_config.return_value = None
-    with pytest.raises(Exception):
+    with pytest.raises(MlflowException, match="URI is formatted incorrectly"):
         databricks_utils.get_databricks_host_creds("databricks:/profile:path")
 
 
@@ -105,12 +111,12 @@ def test_get_workspace_info_from_databricks_secrets():
 
 def test_get_workspace_info_from_dbutils():
     mock_dbutils = mock.MagicMock()
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.browserHostName.return_value.get.return_value = (  # noqa
-        "mlflow.databricks.com"
+    methods = ["notebook.entry_point.getDbutils", "notebook", "getContext"]
+    mock_method_chain(
+        mock_dbutils, methods + ["browserHostName", "get"], return_value="mlflow.databricks.com"
     )
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.workspaceId.return_value.get.return_value = (  # noqa
-        "1111"
-    )
+    mock_method_chain(mock_dbutils, methods + ["workspaceId", "get"], return_value="1111")
+
     with mock.patch("mlflow.utils.databricks_utils._get_dbutils", return_value=mock_dbutils):
         workspace_host, workspace_id = get_workspace_info_from_dbutils()
         assert workspace_host == "https://mlflow.databricks.com"
@@ -119,15 +125,12 @@ def test_get_workspace_info_from_dbutils():
 
 def test_get_workspace_info_from_dbutils_no_browser_host_name():
     mock_dbutils = mock.MagicMock()
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.browserHostName.return_value.get.return_value = (  # noqa
-        None
+    methods = ["notebook.entry_point.getDbutils", "notebook", "getContext"]
+    mock_method_chain(mock_dbutils, methods + ["browserHostName", "get"], return_value=None)
+    mock_method_chain(
+        mock_dbutils, methods + ["apiUrl", "get"], return_value="https://mlflow.databricks.com"
     )
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.apiUrl.return_value.get.return_value = (  # noqa
-        "https://mlflow.databricks.com"
-    )
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.workspaceId.return_value.get.return_value = (  # noqa
-        "1111"
-    )
+    mock_method_chain(mock_dbutils, methods + ["workspaceId", "get"], return_value="1111")
     with mock.patch("mlflow.utils.databricks_utils._get_dbutils", return_value=mock_dbutils):
         workspace_host, workspace_id = get_workspace_info_from_dbutils()
         assert workspace_host == "https://mlflow.databricks.com"
@@ -136,22 +139,29 @@ def test_get_workspace_info_from_dbutils_no_browser_host_name():
 
 def test_get_workspace_info_from_dbutils_old_runtimes():
     mock_dbutils = mock.MagicMock()
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.toJson.return_value = (  # noqa
-        '{"tags": {"orgId" : "1111", "browserHostName": "mlflow.databricks.com"}}'
+    methods = ["notebook.entry_point.getDbutils", "notebook", "getContext"]
+    mock_method_chain(
+        mock_dbutils,
+        methods + ["toJson", "get"],
+        return_value='{"tags": {"orgId" : "1111", "browserHostName": "mlflow.databricks.com"}}',
     )
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.browserHostName.return_value.get.return_value = (  # noqa
-        "mlflow.databricks.com"
+    mock_method_chain(
+        mock_dbutils, methods + ["browserHostName", "get"], return_value="mlflow.databricks.com"
     )
+
     # Mock out workspace ID tag
     mock_workspace_id_tag_opt = mock.MagicMock()
     mock_workspace_id_tag_opt.isDefined.return_value = True
     mock_workspace_id_tag_opt.get.return_value = "1111"
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.tags.return_value.get.return_value = (  # noqa
-        mock_workspace_id_tag_opt
+    mock_method_chain(
+        mock_dbutils, methods + ["tags", "get"], return_value=mock_workspace_id_tag_opt
     )
+
     # Mimic old runtimes by raising an exception when the nonexistent "workspaceId" method is called
-    mock_dbutils.notebook.entry_point.getDbutils.return_value.notebook.return_value.getContext.return_value.workspaceId.side_effect = Exception(  # noqa
-        "workspaceId method not defined!"
+    mock_method_chain(
+        mock_dbutils,
+        methods + ["workspaceId"],
+        side_effect=Exception("workspaceId method not defined!"),
     )
     with mock.patch("mlflow.utils.databricks_utils._get_dbutils", return_value=mock_dbutils):
         workspace_host, workspace_id = get_workspace_info_from_dbutils()
@@ -167,7 +177,7 @@ def test_get_workspace_info_from_dbutils_when_no_dbutils_available():
 
 
 @pytest.mark.parametrize(
-    "tracking_uri, result",
+    ("tracking_uri", "result"),
     [
         ("databricks", True),
         ("databricks://profile:prefix", False),
@@ -191,7 +201,7 @@ def test_databricks_params_throws_errors(ProfileConfigProvider):
         None, "user", "pass", insecure=True
     )
     ProfileConfigProvider.return_value = mock_provider
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="You haven't configured the CLI yet"):
         databricks_utils.get_databricks_host_creds()
 
     # No authentication
@@ -200,25 +210,15 @@ def test_databricks_params_throws_errors(ProfileConfigProvider):
         "host", None, None, insecure=True
     )
     ProfileConfigProvider.return_value = mock_provider
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="You haven't configured the CLI yet"):
         databricks_utils.get_databricks_host_creds()
 
 
 def test_is_in_databricks_runtime():
-    with mock.patch(
-        "sys.modules",
-        new={**sys.modules, "pyspark": mock.MagicMock(), "pyspark.databricks": mock.MagicMock()},
-    ):
-        # pylint: disable=unused-import,import-error,no-name-in-module,unused-variable
-        import pyspark.databricks
-
+    with mock.patch.dict(os.environ, {"DATABRICKS_RUNTIME_VERSION": "11.x"}):
         assert databricks_utils.is_in_databricks_runtime()
 
-    with mock.patch("sys.modules", new={**sys.modules, "pyspark": mock.MagicMock()}):
-        with pytest.raises(ModuleNotFoundError, match="No module named 'pyspark.databricks'"):
-            # pylint: disable=unused-import,import-error,no-name-in-module,unused-variable
-            import pyspark.databricks
-        assert not databricks_utils.is_in_databricks_runtime()
+    assert not databricks_utils.is_in_databricks_runtime()
 
 
 def test_get_repl_id():
@@ -247,7 +247,92 @@ def test_get_repl_id():
         else:
             return original_import(name, *args, **kwargs)
 
-    with mock.patch(
-        "builtins.__import__", side_effect=mock_import,
-    ):
+    with mock.patch("builtins.__import__", side_effect=mock_import):
         assert databricks_utils.get_repl_id() == "testReplId2"
+
+
+def test_use_repl_context_if_available(tmpdir, monkeypatch):
+    # Simulate a case where `dbruntime.databricks_repl_context.get_context` is unavailable.
+    with pytest.raises(ModuleNotFoundError, match="No module named 'dbruntime'"):
+        from dbruntime.databricks_repl_context import get_context  # pylint: disable=unused-import
+
+    command_context_mock = mock.MagicMock()
+    command_context_mock.jobId().get.return_value = "job_id"
+    command_context_mock.tags().get(  # pylint: disable=not-callable
+        "jobType"
+    ).get.return_value = "NORMAL"
+    with mock.patch(
+        "mlflow.utils.databricks_utils._get_command_context", return_value=command_context_mock
+    ) as mock_get_command_context:
+        assert databricks_utils.get_job_id() == "job_id"
+        mock_get_command_context.assert_called_once()
+
+    # Create a fake databricks_repl_context module
+    tmpdir.mkdir("dbruntime").join("databricks_repl_context.py").write(
+        """
+def get_context():
+    pass
+"""
+    )
+    monkeypatch.syspath_prepend(tmpdir.strpath)
+
+    # Simulate a case where the REPL context object is not initialized.
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=None,
+    ) as mock_get_context, mock.patch(
+        "mlflow.utils.databricks_utils._get_command_context", return_value=command_context_mock
+    ) as mock_get_command_context:
+        assert databricks_utils.get_job_id() == "job_id"
+        assert databricks_utils.get_experiment_name_from_job_id("job_id") == "jobs:/job_id"
+        assert databricks_utils.get_job_type_info() == "NORMAL"
+        assert mock_get_command_context.call_count == 2
+
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=mock.MagicMock(jobId="job_id"),
+    ) as mock_get_context, mock.patch("mlflow.utils.databricks_utils._get_dbutils") as mock_dbutils:
+        assert databricks_utils.get_job_id() == "job_id"
+        mock_get_context.assert_called_once()
+        mock_dbutils.assert_not_called()
+
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=mock.MagicMock(notebookId="notebook_id", notebookPath="/Repos/notebook_path"),
+    ) as mock_get_context, mock.patch(
+        "mlflow.utils.databricks_utils._get_property_from_spark_context"
+    ) as mock_spark_context:
+        assert databricks_utils.get_notebook_id() == "notebook_id"
+        assert databricks_utils.is_in_databricks_repo_notebook()
+        assert mock_get_context.call_count == 2
+        mock_spark_context.assert_not_called()
+
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=mock.MagicMock(notebookId="notebook_id", notebookPath="/Users/notebook_path"),
+    ) as mock_get_context, mock.patch(
+        "mlflow.utils.databricks_utils._get_property_from_spark_context"
+    ) as mock_spark_context:
+        assert not databricks_utils.is_in_databricks_repo_notebook()
+
+    with mock.patch(
+        "dbruntime.databricks_repl_context.get_context",
+        return_value=mock.MagicMock(isInCluster=True),
+    ) as mock_get_context, mock.patch(
+        "mlflow.utils._spark_utils._get_active_spark_session"
+    ) as mock_spark_session:
+        assert databricks_utils.is_in_cluster()
+        mock_get_context.assert_called_once()
+        mock_spark_session.assert_not_called()
+
+
+@pytest.mark.parametrize("get_ipython", [True, None])
+def test_is_running_in_ipython_environment_works(get_ipython):
+    mod_name = "IPython"
+    if mod_name in sys.modules:
+        ipython_mod = sys.modules.pop(mod_name)
+        assert not is_running_in_ipython_environment()
+        sys.modules["IPython"] = ipython_mod
+
+        with mock.patch("IPython.get_ipython", return_value=get_ipython):
+            assert is_running_in_ipython_environment() == (get_ipython is not None)

@@ -2,11 +2,12 @@ import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { FormattedMessage } from 'react-intl';
 // eslint-disable-next-line no-unused-vars
-import { Descriptions, Icon, Menu, Popover } from 'antd';
+import { Descriptions } from 'antd';
+import { Button } from '@databricks/design-system';
+
 import './ExperimentView.css';
 import { CollapsibleSection } from '../../common/components/CollapsibleSection';
 import { EditableNote } from '../../common/components/EditableNote';
-import { IconButton } from '../../common/components/IconButton';
 import { Experiment } from '../sdk/MlflowMessages';
 
 export function ExperimentNoteSection(props) {
@@ -17,20 +18,28 @@ export function ExperimentNoteSection(props) {
     noteInfo,
     showNotesEditor,
   } = props;
-
-  const editIcon = <IconButton icon={<Icon type='form' />} onClick={startEditingDescription} />;
-
   const content = noteInfo && noteInfo.content;
 
   return (
     <CollapsibleSection
       title={
-        <span>
+        <span className='ExperimentView-editDescriptionHeader'>
           <FormattedMessage
-            defaultMessage='Notes'
+            defaultMessage='Description'
             description='Header for displaying notes for the experiment table'
           />
-          {showNotesEditor ? null : editIcon}
+          {!showNotesEditor && (
+            <>
+              {' '}
+              <Button type='link' onClick={startEditingDescription}>
+                <FormattedMessage
+                  defaultMessage='Edit'
+                  // eslint-disable-next-line max-len
+                  description='Text for the edit button next to the description section title on the experiment view page'
+                />
+              </Button>
+            </>
+          )}
         </span>
       }
       forceOpen={showNotesEditor}
@@ -54,7 +63,6 @@ ExperimentNoteSection.propTypes = {
   showNotesEditor: PropTypes.bool,
   noteInfo: PropTypes.object,
 };
-
 export class ArtifactLocation extends Component {
   static propTypes = {
     experiment: PropTypes.instanceOf(Experiment).isRequired,

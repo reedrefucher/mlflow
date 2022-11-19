@@ -1,21 +1,20 @@
-import React from 'react';
+import React, { Component } from 'react';
 import Utils from '../utils/Utils';
 import PropTypes from 'prop-types';
-import { Form, Input, Button } from 'antd/lib/index';
+import { Form, Input, Button, Spacer } from '@databricks/design-system';
 import { EditableFormTable } from './tables/EditableFormTable';
 import _ from 'lodash';
-import { Spacer } from '../../shared/building_blocks/Spacer';
 import { FormattedMessage, injectIntl } from 'react-intl';
 
-export class EditableTagsTableViewImpl extends React.Component {
+export class EditableTagsTableViewImpl extends Component {
   static propTypes = {
     tags: PropTypes.object.isRequired,
-    form: PropTypes.object.isRequired,
     handleAddTag: PropTypes.func.isRequired,
     handleSaveEdit: PropTypes.func.isRequired,
     handleDeleteTag: PropTypes.func.isRequired,
     isRequestPending: PropTypes.bool.isRequired,
-    intl: PropTypes.any,
+    intl: PropTypes.shape({ formatMessage: PropTypes.func.isRequired }).isRequired,
+    innerRef: PropTypes.any,
   };
 
   tableColumns = [
@@ -69,58 +68,52 @@ export class EditableTagsTableViewImpl extends React.Component {
   };
 
   render() {
-    const { form, isRequestPending, handleSaveEdit, handleDeleteTag, handleAddTag } = this.props;
-    const { getFieldDecorator } = form;
+    const { isRequestPending, handleSaveEdit, handleDeleteTag, handleAddTag, innerRef } =
+      this.props;
 
     return (
-      <Spacer direction='vertical' size='small'>
+      <>
         <EditableFormTable
           columns={this.tableColumns}
           data={this.getData()}
           onSaveEdit={handleSaveEdit}
           onDelete={handleDeleteTag}
         />
-        <div style={styles.addTagForm.wrapper}>
-          <Form layout='inline' onSubmit={handleAddTag}>
-            <Form.Item>
-              {getFieldDecorator('name', {
-                rules: [
-                  {
-                    required: true,
-                    message: this.props.intl.formatMessage({
-                      defaultMessage: 'Name is required.',
-                      description:
-                        'Error message for name requirement in editable tags table view in MLflow',
-                    }),
-                  },
-                  { validator: this.tagNameValidator },
-                ],
-              })(
-                <Input
-                  aria-label='tag name'
-                  placeholder={this.props.intl.formatMessage({
-                    defaultMessage: 'Name',
+        <Spacer size='small' />
+        <div>
+          <Form ref={innerRef} layout='inline' onFinish={handleAddTag} css={styles.form}>
+            <Form.Item
+              name='name'
+              rules={[
+                {
+                  required: true,
+                  message: this.props.intl.formatMessage({
+                    defaultMessage: 'Name is required.',
                     description:
-                      'Default text for name placeholder in editable tags table form in MLflow',
-                  })}
-                  style={styles.addTagForm.nameInput}
-                />,
-              )}
+                      'Error message for name requirement in editable tags table view in MLflow',
+                  }),
+                  validator: this.tagNameValidator,
+                },
+              ]}
+            >
+              <Input
+                aria-label='tag name'
+                placeholder={this.props.intl.formatMessage({
+                  defaultMessage: 'Name',
+                  description:
+                    'Default text for name placeholder in editable tags table form in MLflow',
+                })}
+              />
             </Form.Item>
-            <Form.Item>
-              {getFieldDecorator('value', {
-                rules: [],
-              })(
-                <Input
-                  aria-label='tag value'
-                  placeholder={this.props.intl.formatMessage({
-                    defaultMessage: 'Value',
-                    description:
-                      'Default text for value placeholder in editable tags table form in MLflow',
-                  })}
-                  style={styles.addTagForm.valueInput}
-                />,
-              )}
+            <Form.Item name='value' rules={[]}>
+              <Input
+                aria-label='tag value'
+                placeholder={this.props.intl.formatMessage({
+                  defaultMessage: 'Value',
+                  description:
+                    'Default text for value placeholder in editable tags table form in MLflow',
+                })}
+              />
             </Form.Item>
             <Form.Item>
               <Button loading={isRequestPending} htmlType='submit' data-test-id='add-tag-button'>
@@ -132,20 +125,13 @@ export class EditableTagsTableViewImpl extends React.Component {
             </Form.Item>
           </Form>
         </div>
-      </Spacer>
+      </>
     );
   }
 }
 
 const styles = {
-  addTagForm: {
-    wrapper: { marginLeft: 7 },
-    label: {
-      marginTop: 20,
-    },
-    nameInput: { width: 186 },
-    valueInput: { width: 186 },
-  },
+  form: (theme) => ({ '& > div': { marginRight: theme.spacing.sm } }),
 };
 
-export const EditableTagsTableView = injectIntl(Form.create()(EditableTagsTableViewImpl));
+export const EditableTagsTableView = injectIntl(EditableTagsTableViewImpl);

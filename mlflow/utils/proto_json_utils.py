@@ -1,19 +1,125 @@
 import base64
 import datetime
 
+import os
+import json
 from json import JSONEncoder
 
 from google.protobuf.json_format import MessageToJson, ParseDict
+from google.protobuf.descriptor import FieldDescriptor
 
 from mlflow.exceptions import MlflowException
 from collections import defaultdict
+from functools import partial
+
+
+_PROTOBUF_INT64_FIELDS = [
+    FieldDescriptor.TYPE_INT64,
+    FieldDescriptor.TYPE_UINT64,
+    FieldDescriptor.TYPE_FIXED64,
+    FieldDescriptor.TYPE_SFIXED64,
+    FieldDescriptor.TYPE_SINT64,
+]
+
+from mlflow.protos.databricks_pb2 import BAD_REQUEST
+
+
+def _mark_int64_fields_for_proto_maps(proto_map, value_field_type):
+    """Converts a proto map to JSON, preserving only int64-related fields."""
+    json_dict = {}
+    for key, value in proto_map.items():
+        # The value of a protobuf map can only be a scalar or a message (not a map or repeated
+        # field).
+        if value_field_type == FieldDescriptor.TYPE_MESSAGE:
+            json_dict[key] = _mark_int64_fields(value)
+        elif value_field_type in _PROTOBUF_INT64_FIELDS:
+            json_dict[key] = int(value)
+        elif isinstance(key, int):
+            json_dict[key] = value
+    return json_dict
+
+
+def _mark_int64_fields(proto_message):
+    """Converts a proto message to JSON, preserving only int64-related fields."""
+    json_dict = {}
+    for field, value in proto_message.ListFields():
+        if (
+            # These three conditions check if this field is a protobuf map.
+            # See the official implementation: https://bit.ly/3EMx1rl
+            field.type == FieldDescriptor.TYPE_MESSAGE
+            and field.message_type.has_options
+            and field.message_type.GetOptions().map_entry
+        ):
+            # Deal with proto map fields separately in another function.
+            json_dict[field.name] = _mark_int64_fields_for_proto_maps(
+                value, field.message_type.fields_by_name["value"].type
+            )
+            continue
+
+        if field.type == FieldDescriptor.TYPE_MESSAGE:
+            ftype = partial(_mark_int64_fields)
+        elif field.type in _PROTOBUF_INT64_FIELDS:
+            ftype = int
+        else:
+            # Skip all non-int64 fields.
+            continue
+
+        json_dict[field.name] = (
+            [ftype(v) for v in value]
+            if field.label == FieldDescriptor.LABEL_REPEATED
+            else ftype(value)
+        )
+    return json_dict
+
+
+def _merge_json_dicts(from_dict, to_dict):
+    """Merges the json elements of from_dict into to_dict. Only works for json dicts
+    converted from proto messages
+    """
+    for key, value in from_dict.items():
+        if isinstance(key, int) and str(key) in to_dict:
+            # When the key (i.e. the proto field name) is an integer, it must be a proto map field
+            # with integer as the key. For example:
+            # from_dict is {'field_map': {1: '2', 3: '4'}}
+            # to_dict is {'field_map': {'1': '2', '3': '4'}}
+            # So we need to replace the str keys with int keys in to_dict.
+            to_dict[key] = to_dict[str(key)]
+            del to_dict[str(key)]
+
+        if key not in to_dict:
+            continue
+
+        if isinstance(value, dict):
+            _merge_json_dicts(from_dict[key], to_dict[key])
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                if isinstance(v, dict):
+                    _merge_json_dicts(v, to_dict[key][i])
+                else:
+                    to_dict[key][i] = v
+        else:
+            to_dict[key] = from_dict[key]
+    return to_dict
 
 
 def message_to_json(message):
     """Converts a message to JSON, using snake_case for field names."""
-    # Note protobuf encodes int64, fixed64, and uint64 to string:
-    # https://developers.google.com/protocol-buffers/docs/proto3#json
-    return MessageToJson(message, preserving_proto_field_name=True)
+
+    # Google's MessageToJson API converts int64 proto fields to JSON strings.
+    # For more info, see https://github.com/protocolbuffers/protobuf/issues/2954
+    json_dict_with_int64_as_str = json.loads(
+        MessageToJson(message, preserving_proto_field_name=True)
+    )
+    # We convert this proto message into a JSON dict where only int64 proto fields
+    # are preserved, and they are treated as JSON numbers, not strings.
+    json_dict_with_int64_fields_only = _mark_int64_fields(message)
+    # By merging these two JSON dicts, we end up with a JSON dict where int64 proto fields are not
+    # converted to JSON strings. Int64 keys in proto maps will always be converted to JSON strings
+    # because JSON doesn't support non-string keys.
+    json_dict_with_int64_as_numbers = _merge_json_dicts(
+        json_dict_with_int64_fields_only, json_dict_with_int64_as_str
+    )
+    return json.dumps(json_dict_with_int64_as_numbers, indent=2)
 
 
 def _stringify_all_experiment_ids(x):
@@ -65,7 +171,7 @@ class NumpyEncoder(JSONEncoder):
             return base64.encodebytes(x).decode("ascii")
 
         if isinstance(o, np.ndarray):
-            if o.dtype == np.object:
+            if o.dtype == object:
                 return [self.try_convert(x)[0] for x in o.tolist()], True
             elif o.dtype == np.bytes_:
                 return np.vectorize(encode_binary)(o), True
@@ -74,7 +180,7 @@ class NumpyEncoder(JSONEncoder):
 
         if isinstance(o, np.generic):
             return o.item(), True
-        if isinstance(o, bytes) or isinstance(o, bytearray):
+        if isinstance(o, (bytes, bytearray)):
             return encode_binary(o), True
         if isinstance(o, np.datetime64):
             return np.datetime_as_string(o), True
@@ -90,51 +196,134 @@ class NumpyEncoder(JSONEncoder):
             return super().default(o)
 
 
-def _dataframe_from_json(
-    path_or_str, schema=None, pandas_orient: str = "split", precise_float=False
-):
-    """
-    Parse json into pandas.DataFrame. User can pass schema to ensure correct type parsing and to
-    make any necessary conversions (e.g. string -> binary for binary columns).
+class MlflowFailedTypeConversion(MlflowException):
+    def __init__(self, col_name, col_type, ex):
+        super().__init__(
+            message=f"Data is not compatible with model signature. "
+            f"Failed to convert column {col_name} to type '{col_type}'. Error: '{ex}'",
+            error_code=BAD_REQUEST,
+        )
 
-    :param path_or_str: Path to a json file or a json string.
+
+def cast_df_types_according_to_schema(pdf, schema):
+    from mlflow.types.schema import DataType
+    import numpy as np
+
+    actual_cols = set(pdf.columns)
+    if schema.has_input_names():
+        dtype_list = zip(schema.input_names(), schema.input_types())
+    elif schema.is_tensor_spec() and len(schema.input_types()) == 1:
+        dtype_list = zip(actual_cols, [schema.input_types()[0] for _ in actual_cols])
+    else:
+        n = min(len(schema.input_types(), pdf.columns))
+        dtype_list = zip(pdf.columns[:n], schema.input_types[:n])
+
+    for col_name, col_type_spec in dtype_list:
+        if isinstance(col_type_spec, DataType):
+            col_type = col_type_spec.to_pandas()
+        else:
+            col_type = col_type_spec
+        if col_name in actual_cols:
+            try:
+                if col_type_spec == DataType.binary:
+                    # NB: We expect binary data to be passed base64 encoded
+                    pdf[col_name] = pdf[col_name].map(
+                        lambda x: base64.decodebytes(bytes(x, "utf8"))
+                    )
+                elif col_type == np.dtype(bytes):
+                    pdf[col_name] = pdf[col_name].map(lambda x: bytes(x, "utf8"))
+                else:
+                    pdf[col_name] = pdf[col_name].astype(col_type, copy=False)
+            except Exception as ex:
+                raise MlflowFailedTypeConversion(col_name, col_type, ex)
+    return pdf
+
+
+class MlflowBadScoringInputException(MlflowException):
+    def __init__(self, message):
+        super().__init__(message, error_code=BAD_REQUEST)
+
+
+def dataframe_from_parsed_json(decoded_input, pandas_orient, schema=None):
+    """
+    Convert parsed json into pandas.DataFrame. If schema is provided this methods will attempt to
+    cast data types according to the schema. This include base64 decoding for binary columns.
+
+    :param decoded_input: Parsed json - either a list or a dictionary.
     :param schema: Mlflow schema used when parsing the data.
     :param pandas_orient: pandas data frame convention used to store the data.
     :return: pandas.DataFrame.
     """
     import pandas as pd
 
-    from mlflow.types import DataType
-
-    if schema is not None:
-        if schema.is_tensor_spec():
-            # The schema can be either:
-            #  - a single tensor: attempt to parse all columns with the same dtype
-            #  - a dictionary of tensors: each column gets the type from an equally named tensor
-            if len(schema.inputs) == 1:
-                dtypes = schema.numpy_types()[0]
+    if pandas_orient == "records":
+        if not isinstance(decoded_input, list):
+            if isinstance(decoded_input, dict):
+                typemessage = "dictionary"
             else:
-                dtypes = dict(zip(schema.input_names(), schema.numpy_types()))
-        else:
-            dtypes = dict(zip(schema.input_names(), schema.pandas_types()))
+                typemessage = f"type {type(decoded_input)}"
+            raise MlflowBadScoringInputException(
+                f"Dataframe records format must be a list of records. Got {typemessage}."
+            )
+        try:
+            pdf = pd.DataFrame(data=decoded_input)
+        except Exception as ex:
+            raise MlflowBadScoringInputException(
+                f"Provided dataframe_records field is not a valid dataframe representation in "
+                f"'records' format. Error: '{ex}'"
+            )
+    elif pandas_orient == "split":
+        if not isinstance(decoded_input, dict):
+            if isinstance(decoded_input, list):
+                typemessage = "list"
+            else:
+                typemessage = f"type {type(decoded_input)}"
+            raise MlflowBadScoringInputException(
+                f"Dataframe split format must be a dictionary. Got {typemessage}."
+            )
+        keys = set(decoded_input.keys())
+        missing_data = "data" not in keys
+        extra_keys = keys.difference({"columns", "data", "index"})
+        if missing_data or extra_keys:
+            raise MlflowBadScoringInputException(
+                f"Dataframe split format must have 'data' field and optionally 'columns' "
+                f"and 'index' fields. Got {keys}.'"
+            )
+        try:
+            pdf = pd.DataFrame(
+                index=decoded_input.get("index"),
+                columns=decoded_input.get("columns"),
+                data=decoded_input["data"],
+            )
+        except Exception as ex:
+            raise MlflowBadScoringInputException(
+                f"Provided dataframe_split field is not a valid dataframe representation in "
+                f"'split' format. Error: '{ex}'"
+            )
+    if schema is not None:
+        pdf = cast_df_types_according_to_schema(pdf, schema)
+    return pdf
 
-        df = pd.read_json(
-            path_or_str,
-            orient=pandas_orient,
-            dtype=dtypes,
-            precise_float=precise_float,
-            convert_dates=False,
-        )
-        if not schema.is_tensor_spec():
-            actual_cols = set(df.columns)
-            for type_, name in zip(schema.input_types(), schema.input_names()):
-                if type_ == DataType.binary and name in actual_cols:
-                    df[name] = df[name].map(lambda x: base64.decodebytes(bytes(x, "utf8")))
-        return df
+
+def dataframe_from_raw_json(path_or_str, schema=None, pandas_orient: str = "split"):
+    """
+    Parse raw json into a pandas.Dataframe.
+
+    If schema is provided this methods will attempt to cast data types according to the schema. This
+    include base64 decoding for binary columns.
+
+    :param path_or_str: Path to a json file or a json string.
+    :param schema: Mlflow schema used when parsing the data.
+    :param pandas_orient: pandas data frame convention used to store the data.
+    :return: pandas.DataFrame.
+    """
+    if os.path.exists(path_or_str):
+        with open(path_or_str, "r") as f:
+            parsed_json = json.load(f)
     else:
-        return pd.read_json(
-            path_or_str, orient=pandas_orient, dtype=False, precise_float=precise_float
-        )
+        parsed_json = json.loads(path_or_str)
+
+    return dataframe_from_parsed_json(parsed_json, pandas_orient, schema)
 
 
 def _get_jsonable_obj(data, pandas_orient="records"):
@@ -241,8 +430,9 @@ def parse_tf_serving_input(inp_dict, schema=None):
             " https://www.tensorflow.org/tfx/serving/api_rest#request_format_2"
         )
 
-    # Sanity check inputted data
-    if isinstance(data, dict):
+    # Sanity check inputted data. This check will only be applied when the row-format `instances`
+    # is used since it requires same 0-th dimension for all items.
+    if isinstance(data, dict) and "instances" in inp_dict:
         # ensure all columns have the same number of items
         expected_len = len(list(data.values())[0])
         if not all(len(v) == expected_len for v in data.values()):
@@ -252,3 +442,14 @@ def parse_tf_serving_input(inp_dict, schema=None):
             )
 
     return data
+
+
+# Reference: https://stackoverflow.com/a/12126976
+class _DateTimeEncoder(json.JSONEncoder):
+    def default(self, o):
+        import pandas as pd
+
+        if isinstance(o, (datetime.datetime, datetime.date, datetime.time, pd.Timestamp)):
+            return o.isoformat()
+
+        return super().default(o)

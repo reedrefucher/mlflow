@@ -31,7 +31,8 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
     The artifact_uri is expected to be of the form
     - `models:/<model_name>/<model_version>`
     - `models:/<model_name>/<stage>`  (refers to the latest model version in the given stage)
-    - `models://<profile>/<model_name>/<model_version or stage>`
+    - `models:/<model_name>/latest`  (refers to the latest of all model versions)
+    - `models://<profile>/<model_name>/<model_version or stage or 'latest'>`
 
     Note : This artifact repository is meant is to be instantiated by the ModelsArtifactRepository
     when the client is pointing to a Databricks-hosted model registry.
@@ -44,7 +45,7 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
                 error_code=INVALID_PARAMETER_VALUE,
             )
         super().__init__(artifact_uri)
-        from mlflow.tracking import MlflowClient
+        from mlflow.tracking.client import MlflowClient
 
         self.databricks_profile_uri = (
             get_databricks_profile_uri_from_artifact_uri(artifact_uri) or mlflow.get_registry_uri()
@@ -71,8 +72,9 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
             json_body = self._make_json_body(path, page_token)
             response = self._call_endpoint(json_body, REGISTRY_LIST_ARTIFACTS_ENDPOINT)
             try:
+                response.raise_for_status()
                 json_response = json.loads(response.text)
-            except ValueError:
+            except Exception:
                 raise MlflowException(
                     "API request to list files under path `%s` failed with status code %s. "
                     "Response body: %s" % (path, response.status_code, response.text)
@@ -96,6 +98,7 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
             page_token = next_page_token
         return infos
 
+    # TODO: Change the implementation of this to match how databricks_artifact_repo.py handles this
     def _get_signed_download_uri(self, path=None):
         if not path:
             path = ""
@@ -108,12 +111,20 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
                 "API request to get presigned uri to for file under path `%s` failed with"
                 " status code %s. Response body: %s" % (path, response.status_code, response.text)
             )
-        return json_response.get("signed_uri", None)
+        return json_response.get("signed_uri", None), json_response.get("headers", None)
+
+    def _extract_headers_from_signed_url(self, headers):
+        filtered_headers = filter(lambda h: "name" in h and "value" in h, headers)
+        return {header.get("name"): header.get("value") for header in filtered_headers}
 
     def _download_file(self, remote_file_path, local_path):
         try:
-            signed_uri = self._get_signed_download_uri(remote_file_path)
-            download_file_using_http_uri(signed_uri, local_path, _DOWNLOAD_CHUNK_SIZE)
+            signed_uri, raw_headers = self._get_signed_download_uri(remote_file_path)
+            headers = {}
+            if raw_headers is not None:
+                # Don't send None to _extract_headers_from_signed_url
+                headers = self._extract_headers_from_signed_url(raw_headers)
+            download_file_using_http_uri(signed_uri, local_path, _DOWNLOAD_CHUNK_SIZE, headers)
         except Exception as err:
             raise MlflowException(err)
 

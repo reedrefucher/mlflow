@@ -4,18 +4,18 @@ import os
 import pytest
 from unittest import mock
 
-from mlflow.exceptions import MlflowException
 from mlflow.store.db.db_types import DATABASE_ENGINES
 from mlflow.store.model_registry.sqlalchemy_store import SqlAlchemyStore
 from mlflow.store.model_registry.rest_store import RestStore
 from mlflow.tracking._model_registry.utils import _get_store, get_registry_uri, set_registry_uri
 from mlflow.tracking._tracking_service.utils import _TRACKING_URI_ENV_VAR
+from mlflow.tracking.registry import UnsupportedModelRegistryStoreURIException
 
 
 # Disable mocking tracking URI here, as we want to test setting the tracking URI via
 # environment variable. See
 # http://doc.pytest.org/en/latest/skipping.html#skip-all-test-functions-of-a-class-or-module
-# and https://github.com/mlflow/mlflow/blob/master/CONTRIBUTING.rst#writing-python-tests
+# and https://github.com/mlflow/mlflow/blob/master/CONTRIBUTING.md#writing-python-tests
 # for more information.
 pytestmark = pytest.mark.notrackingurimock
 
@@ -98,12 +98,14 @@ def test_get_store_sqlalchemy_store(db_type):
 def test_get_store_bad_uris(bad_uri):
     env = {_TRACKING_URI_ENV_VAR: bad_uri}
 
-    with mock.patch.dict(os.environ, env), pytest.raises(MlflowException):
+    with mock.patch.dict(os.environ, env), pytest.raises(
+        UnsupportedModelRegistryStoreURIException,
+        match="Model registry functionality is unavailable",
+    ):
         _get_store()
 
 
 def test_get_store_caches_on_store_uri(tmpdir):
-    help(tmpdir)
     store_uri_1 = "sqlite:///" + tmpdir.join("store1.db").strpath
     store_uri_2 = "sqlite:///" + tmpdir.join("store2.db").strpath
 

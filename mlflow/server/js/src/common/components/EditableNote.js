@@ -1,8 +1,8 @@
 import React, { Component } from 'react';
-import { Alert, Button, Icon, Tooltip } from 'antd';
+import { Alert, Button, Tooltip } from '@databricks/design-system';
 import { Prompt } from 'react-router';
 import ReactMde, { SvgIcon } from 'react-mde';
-import { getConverter, sanitizeConvertedHtml } from '../utils/MarkdownUtils';
+import { forceAnchorTagNewTab, getConverter, sanitizeConvertedHtml } from '../utils/MarkdownUtils';
 import PropTypes from 'prop-types';
 import './EditableNote.css';
 import { FormattedMessage, injectIntl } from 'react-intl';
@@ -109,13 +109,13 @@ export class EditableNoteImpl extends Component {
       <div className='editable-note-actions'>
         <div>
           <Button
-            htmlType='button'
             type='primary'
             className='editable-note-save-button'
             onClick={this.handleSubmitClick}
             disabled={!this.contentHasChanged() || confirmLoading}
+            loading={confirmLoading}
           >
-            {confirmLoading && <Icon type='loading' />} {this.props.saveText}
+            {this.props.saveText}
           </Button>
           <Button
             htmlType='button'
@@ -135,7 +135,11 @@ export class EditableNoteImpl extends Component {
 
   getSanitizedHtmlContent() {
     const { markdown } = this.state;
-    return markdown ? sanitizeConvertedHtml(this.converter.makeHtml(markdown)) : null;
+    if (markdown) {
+      const sanitized = sanitizeConvertedHtml(this.converter.makeHtml(markdown));
+      return forceAnchorTagNewTab(sanitized);
+    }
+    return null;
   }
 
   render() {

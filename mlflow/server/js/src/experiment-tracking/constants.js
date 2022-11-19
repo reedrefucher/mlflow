@@ -8,7 +8,8 @@ export const MLMODEL_FILE_NAME = 'MLmodel';
 export const ONE_MB = 1024 * 1024;
 
 export const ATTRIBUTE_COLUMN_LABELS = {
-  DATE: 'Start Time',
+  DATE: 'Created',
+  EXPERIMENT_NAME: 'Experiment Name',
   DURATION: 'Duration',
   USER: 'User',
   RUN_NAME: 'Run Name',
@@ -18,7 +19,7 @@ export const ATTRIBUTE_COLUMN_LABELS = {
 };
 
 export const ATTRIBUTE_COLUMN_SORT_LABEL = {
-  DATE: 'Start Time',
+  DATE: 'Created',
   USER: 'User',
   RUN_NAME: 'Run Name',
   SOURCE: 'Source',
@@ -54,6 +55,9 @@ export const DEFAULT_CATEGORIZED_UNCHECKED_KEYS = {
   [COLUMN_TYPES.METRICS]: [],
   [COLUMN_TYPES.TAGS]: [],
 };
+export const DEFAULT_DIFF_SWITCH_SELECTED = false;
+export const DEFAULT_LIFECYCLE_FILTER = LIFECYCLE_FILTER.ACTIVE;
+export const DEFAULT_MODEL_VERSION_FILTER = MODEL_VERSION_FILTER.ALL_RUNS;
 
 export const PAGINATION_DEFAULT_STATE = {
   nextPageToken: null,
@@ -62,4 +66,8 @@ export const PAGINATION_DEFAULT_STATE = {
 };
 
 export const MAX_DETECT_NEW_RUNS_RESULTS = 26; // so the refresh button badge can be 25+
-export const DETECT_NEW_RUNS_INTERVAL = 15000;
+export const POLL_INTERVAL = 15000;
+
+export const MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME = 'mlflow.experiment.primaryMetric.name';
+export const MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER =
+  'mlflow.experiment.primaryMetric.greaterIsBetter';

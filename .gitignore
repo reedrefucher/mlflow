@@ -2,6 +2,7 @@
 mlruns/
 mlartifacts/
 outputs/
+mlruns.db
 
 # Mac
 .DS_Store
@@ -100,3 +101,5 @@ travis_wait*.log
 
 # Pytorch logs
 lightning_logs
+
+a.py

@@ -2,14 +2,28 @@ name: Examples
 
 on:
   pull_request:
-    branches: [ master ]
   schedule:
-    # Run this action daily at 7:00 UTC
-    - cron: "0 7 * * *"
+    # Run this action daily at 13:00 UTC
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: >
+          [Optional] Repository name with owner. For example, mlflow/mlflow.
+           Defaults to the repository that triggered a workflow.
+        required: false
+        default: ""
+      ref:
+        description: >
+          [Optional] The branch, tag or SHA to checkout. When checking out the repository that
+           triggered a workflow, this defaults to the reference or SHA for that event. Otherwise,
+           uses the default branch.
+        required: false
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -21,8 +35,13 @@ env:
 jobs:
   examples:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || github.repository == 'mlflow/mlflow'
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
+      with:
+        repository: ${{ github.event.inputs.repository }}
+        ref: ${{ github.event.inputs.ref }}
+        submodules: recursive
     - name: Increase available disk space
       run: |
         # Increase available disk space by removing unnecessary tool chains:
@@ -43,26 +62,23 @@ jobs:
 
         echo -e "CHANGED_FILES:\nCHANGED_FILES"
         echo "EXAMPLES_CHANGED: $EXAMPLES_CHANGED"
-        echo "::set-output name=examples_changed::$EXAMPLES_CHANGED"
+        echo "examples_changed=$EXAMPLES_CHANGED" >> $GITHUB_OUTPUT
 
     - uses: ./.github/actions/setup-python
-      with:
-        python-version: 3.6
+    - uses: ./.github/actions/setup-pyenv
 
     - name: Install dependencies
       if: ${{ github.event_name == 'schedule' || steps.check-diff.outputs.examples_changed == 'true' }}
-      env:
-        INSTALL_SMALL_PYTHON_DEPS: true
-        INSTALL_LARGE_PYTHON_DEPS: true
       run: |
-        source ./dev/install-common-deps.sh
+        source ./dev/install-common-deps.sh --ml
 
     - name: Run example tests
       if: ${{ github.event_name == 'schedule' || steps.check-diff.outputs.examples_changed == 'true' }}
       env:
-        SPARK_LOCAL_IP: 127.0.0.1
+        SPARK_LOCAL_IP: localhost
       run: |
-        pytest tests/examples --durations=30 --large
+        export MLFLOW_HOME=$(pwd)
+        pytest tests/examples --durations=30
 
     - name: Remove conda environments
       run: |
@@ -75,8 +91,13 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || github.repository == 'mlflow/mlflow'
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
+      with:
+        repository: ${{ github.event.inputs.repository }}
+        ref: ${{ github.event.inputs.ref }}
+        submodules: recursive
     - name: Increase available disk space
       run: |
         rm -rf "$AGENT_TOOLSDIRECTORY"
@@ -95,7 +116,7 @@ jobs:
 
         echo -e "CHANGED_FILES:\nCHANGED_FILES"
         echo "DOCKER_CHANGED: $DOCKER_CHANGED"
-        echo "::set-output name=docker_changed::$DOCKER_CHANGED"
+        echo "docker_changed=$DOCKER_CHANGED" >> $GITHUB_OUTPUT
 
     - name: Run docker tests
       if: ${{ github.event_name == 'schedule' || steps.check-diff.outputs.docker_changed == 'true' }}

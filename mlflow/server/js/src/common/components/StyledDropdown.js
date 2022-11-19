@@ -1,34 +1,22 @@
 import React from 'react';
 import PropTypes from 'prop-types';
-import { Button, Dropdown } from 'antd';
+import { Button, Dropdown } from '@databricks/design-system';
 import expandIcon from '../static/expand-more.svg';
 import { getUUID } from '../utils/ActionUtils';
-import { css } from 'emotion';
 
-export const StyledDropdown = ({
-  id,
-  className,
-  key,
-  title,
-  triggers,
-  dropdownOptions,
-  buttonSize,
-}) => {
+export const StyledDropdown = ({ id, className, title, triggers, dropdownOptions, buttonSize }) => {
   return (
-    <div className={classNames.wrapper}>
+    <div css={classNames.wrapper}>
       <Dropdown
         id={id}
         className={className}
-        key={key}
         title={title}
         trigger={triggers}
         overlay={dropdownOptions}
       >
-        <Button className='StyledDropdown-button' size={buttonSize}>
-          <div className='StyledDropdown-button-content'>
-            <span>{title}</span>{' '}
-            <img className='StyledDropdown-chevron' src={expandIcon} alt='Expand' />
-          </div>
+        <Button className='StyledDropdown-button' size={buttonSize} css={classNames.button}>
+          <span>{title}</span>{' '}
+          <img className='StyledDropdown-chevron' src={expandIcon} alt='Expand' />
         </Button>
       </Dropdown>
     </div>
@@ -36,25 +24,21 @@ export const StyledDropdown = ({
 };
 
 const classNames = {
-  wrapper: css({
+  button: (theme) => ({
+    fontSize: theme.typography.fontSizeBase,
+  }),
+  wrapper: {
     display: 'inline-block',
     '.StyledDropdown-button': {
       padding: 0,
       color: '#1D2528',
     },
-    '.StyledDropdown-button-content': {
-      paddingLeft: '16px',
-      paddingRight: '16px',
-      display: 'flex',
-      alignItems: 'center',
-    },
-  }),
+  },
 };
 
 StyledDropdown.propTypes = {
   dropdownOptions: PropTypes.node.isRequired,
   title: PropTypes.string.isRequired,
-  key: PropTypes.string,
   buttonSize: PropTypes.string,
   triggers: PropTypes.array,
   className: PropTypes.string,

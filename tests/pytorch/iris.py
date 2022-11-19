@@ -4,7 +4,7 @@
 
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
 
 # NB: Older versions of PyTorch Lightning define native APIs for metric computation,
@@ -48,6 +48,7 @@ class IrisClassification(IrisClassificationBase):
         self.train_acc(torch.argmax(logits, dim=1), y)
         self.log("train_acc", self.train_acc.compute(), on_step=False, on_epoch=True)
         self.log("loss", loss)
+        self.log("loss_forked", loss, on_epoch=True, on_step=True)
         return {"loss": loss}
 
     def validation_step(self, batch, batch_idx):

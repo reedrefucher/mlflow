@@ -1,15 +1,16 @@
 import React, { Component } from 'react';
 import PropTypes from 'prop-types';
-import './ShowArtifactImageView.css';
 import { getSrc } from './ShowArtifactPage';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Pagination, Spin } from 'antd';
+import { Pagination, Spinner } from '@databricks/design-system';
 import { getArtifactBytesContent } from '../../../common/utils/ArtifactUtils';
 import './ShowArtifactPdfView.css';
+import Utils from '../../../common/utils/Utils';
+import { ErrorWrapper } from '../../../common/utils/ErrorWrapper';
 
 // See: https://github.com/wojtekmaj/react-pdf/blob/master/README.md#enable-pdfjs-worker for how
 // workerSrc is supposed to be specified.
-pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL}/pdf.worker.js`;
+pdfjs.GlobalWorkerOptions.workerSrc = `./static-files/pdf.worker.js`;
 
 class ShowArtifactPdfView extends Component {
   state = {
@@ -57,6 +58,10 @@ class ShowArtifactPdfView extends Component {
     this.setState({ numPages });
   };
 
+  onDocumentLoadError = (error) => {
+    Utils.logErrorAndNotifyUser(new ErrorWrapper(error));
+  };
+
   onPageChange = (newPageNumber, itemsPerPage) => {
     this.setState({ currentPage: newPageNumber });
   };
@@ -68,19 +73,25 @@ class ShowArtifactPdfView extends Component {
           <div className='paginator'>
             <Pagination
               simple
-              current={this.state.currentPage}
-              total={this.state.numPages}
+              currentPageIndex={this.state.currentPage}
+              numTotal={this.state.numPages}
               pageSize={1}
               onChange={this.onPageChange}
+              /*
+               * Currently DuBois pagination does not natively support
+               * "simple" mode which is required here, hence `dangerouslySetAntdProps`
+               */
+              dangerouslySetAntdProps={{ simple: true }}
             />
           </div>
           <div className='document'>
             <Document
               file={this.state.pdfData}
               onLoadSuccess={this.onDocumentLoadSuccess}
-              loading={<Spin />}
+              onLoadError={this.onDocumentLoadError}
+              loading={<Spinner />}
             >
-              <Page pageNumber={this.state.currentPage} loading={<Spin />} />
+              <Page pageNumber={this.state.currentPage} loading={<Spinner />} />
             </Document>
           </div>
         </div>

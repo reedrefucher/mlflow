@@ -16,15 +16,15 @@ from mlflow.utils.validation import MAX_METRICS_PER_BATCH
 _logger = logging.getLogger(__name__)
 
 # Import autologging utilities used by this module
-from mlflow.utils.autologging_utils.logging_and_warnings import (  # noqa: E402
+from mlflow.utils.autologging_utils.logging_and_warnings import (
     set_mlflow_events_and_warnings_behavior_globally,
     set_non_mlflow_warnings_behavior_for_current_thread,
 )
-from mlflow.utils.autologging_utils.safety import (  # noqa: E402
+from mlflow.utils.autologging_utils.safety import (
     update_wrapper_extended,
     revert_patches,
 )
-from mlflow.utils.autologging_utils.versioning import (  # noqa: E402
+from mlflow.utils.autologging_utils.versioning import (
     FLAVOR_TO_MODULE_NAME_AND_VERSION_INFO_KEY,
     get_min_max_version_and_pip_release,
     is_flavor_supported_for_associated_package_versions,
@@ -33,9 +33,9 @@ from mlflow.utils.autologging_utils.versioning import (  # noqa: E402
 # Wildcard import other autologging utilities (e.g. safety utilities, event logging utilities) used
 # in autologging integration implementations, which reference them via the
 # `mlflow.utils.autologging_utils` module
-from mlflow.utils.autologging_utils.safety import *  # noqa: E402
-from mlflow.utils.autologging_utils.events import *  # noqa: E402
-from mlflow.utils.autologging_utils.client import *  # noqa: E402
+from mlflow.utils.autologging_utils.safety import *
+from mlflow.utils.autologging_utils.events import *
+from mlflow.utils.autologging_utils.client import *
 
 
 INPUT_EXAMPLE_SAMPLE_ROWS = 5
@@ -46,6 +46,12 @@ _AUTOLOGGING_TEST_MODE_ENV_VAR = "MLFLOW_AUTOLOGGING_TESTING"
 
 # Flag indicating whether autologging is globally disabled for all integrations.
 _AUTOLOGGING_GLOBALLY_DISABLED = False
+
+# Autologging config key indicating whether or not a particular autologging integration
+# was configured (i.e. its various `log_models`, `disable`, etc. configuration options
+# were set) via a call to `mlflow.autolog()`, rather than via a call to the integration-specific
+# autologging method (e.g., `mlflow.tensorflow.autolog()`, ...)
+AUTOLOGGING_CONF_KEY_IS_GLOBALLY_CONFIGURED = "globally_configured"
 
 # Dict mapping integration name to its config.
 AUTOLOGGING_INTEGRATIONS = {}
@@ -505,7 +511,7 @@ def _get_new_training_session_class():
     # 1. We don't currently have any use cases for allow_children=True.
     # 2. The list append & pop operations are thread-safe, so we will always clear the session stack
     #    once all _TrainingSessions exit.
-    class _TrainingSession(object):
+    class _TrainingSession:
         _session_stack = []
 
         def __init__(self, clazz, allow_children=True):

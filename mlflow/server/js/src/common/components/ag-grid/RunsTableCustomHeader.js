@@ -78,7 +78,9 @@ export class RunsTableCustomHeader extends React.Component {
         {enableSorting && canonicalSortKey === orderByKey ? (
           <SortByIcon orderByAsc={orderByAsc} />
         ) : null}
-        <span data-test-id={`sort-header-${displayName}`}>{displayName}</span>
+        <span data-test-id={`sort-header-${displayName}`} title={canonicalSortKey}>
+          {displayName}
+        </span>
       </div>
     );
   }
@@ -87,7 +89,7 @@ export class RunsTableCustomHeader extends React.Component {
 export function SortByIcon({ orderByAsc }) {
   return (
     <span style={styles.headerSortIcon}>
-      <i className={`fa fa-long-arrow-alt-${orderByAsc ? 'up' : 'down'}`} />
+      <i className={`fa fa-long-arrow-${orderByAsc ? 'up' : 'down'}`} />
     </span>
   );
 }

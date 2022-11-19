@@ -4,13 +4,13 @@ from paddle.nn import Linear
 import paddle.nn.functional as F
 import numpy as np
 
-from sklearn.datasets import load_boston
+from sklearn.datasets import load_diabetes
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
 
 
 def load_data():
-    X, y = load_boston(return_X_y=True)
+    X, y = load_diabetes(return_X_y=True)
 
     min_max_scaler = preprocessing.MinMaxScaler()
     X_min_max = min_max_scaler.fit_transform(X)
@@ -27,7 +27,7 @@ def load_data():
 
 class Regressor(paddle.nn.Layer):
     def __init__(self):
-        super(Regressor, self).__init__()
+        super().__init__()
 
         self.fc = Linear(in_features=13, out_features=1)
 

@@ -1,15 +1,17 @@
 import os
 
+import docker
 import pytest
-import posixpath  # pylint: disable=unused-import
 from unittest import mock
 
 from databricks_cli.configure.provider import DatabricksConfig
 
 import mlflow
+from mlflow import MlflowClient
 from mlflow.entities import ViewType
+from mlflow.exceptions import MlflowException
+from mlflow.projects import ExecutionException, _project_spec
 from mlflow.projects.docker import _get_docker_image_uri
-from mlflow.projects import ExecutionException
 from mlflow.projects.backend.local import _get_docker_command
 from mlflow.store.tracking import file_store
 from mlflow.utils.mlflow_tags import (
@@ -20,8 +22,6 @@ from mlflow.utils.mlflow_tags import (
 )
 from tests.projects.utils import TEST_DOCKER_PROJECT_DIR
 from tests.projects.utils import docker_example_base_image  # pylint: disable=unused-import
-from mlflow.projects import _project_spec
-from mlflow.exceptions import MlflowException
 
 
 def _build_uri(base_uri, subdirectory):
@@ -31,7 +31,6 @@ def _build_uri(base_uri, subdirectory):
 
 
 @pytest.mark.parametrize("use_start_run", map(str, [0, 1]))
-@pytest.mark.large
 def test_docker_project_execution(
     use_start_run, tmpdir, docker_example_base_image
 ):  # pylint: disable=unused-argument
@@ -41,16 +40,17 @@ def test_docker_project_execution(
         experiment_id=file_store.FileStore.DEFAULT_EXPERIMENT_ID,
         parameters=expected_params,
         entry_point="test_tracking",
+        build_image=True,
         docker_args={"memory": "1g", "privileged": True},
     )
     # Validate run contents in the FileStore
     run_id = submitted_run.run_id
-    mlflow_service = mlflow.tracking.MlflowClient()
-    run_infos = mlflow_service.list_run_infos(
-        experiment_id=file_store.FileStore.DEFAULT_EXPERIMENT_ID, run_view_type=ViewType.ACTIVE_ONLY
+    mlflow_service = MlflowClient()
+    runs = mlflow_service.search_runs(
+        [file_store.FileStore.DEFAULT_EXPERIMENT_ID], run_view_type=ViewType.ACTIVE_ONLY
     )
-    assert len(run_infos) == 1
-    store_run_id = run_infos[0].run_id
+    assert len(runs) == 1
+    store_run_id = runs[0].info.run_id
     assert run_id == store_run_id
     run = mlflow_service.get_run(run_id)
     assert run.data.params == expected_params
@@ -75,7 +75,6 @@ def test_docker_project_execution(
     assert "--privileged" in docker_cmd
 
 
-@pytest.mark.large
 def test_docker_project_execution_async_docker_args(
     tmpdir, docker_example_base_image
 ):  # pylint: disable=unused-argument
@@ -98,7 +97,7 @@ def test_docker_project_execution_async_docker_args(
 
 
 @pytest.mark.parametrize(
-    "tracking_uri, expected_command_segment",
+    ("tracking_uri", "expected_command_segment"),
     [
         (None, "-e MLFLOW_TRACKING_URI=/mlflow/tmp/mlruns"),
         ("http://some-tracking-uri", "-e MLFLOW_TRACKING_URI=http://some-tracking-uri"),
@@ -106,7 +105,6 @@ def test_docker_project_execution_async_docker_args(
     ],
 )
 @mock.patch("databricks_cli.configure.provider.ProfileConfigProvider")
-@pytest.mark.large
 def test_docker_project_tracking_uri_propagation(
     ProfileConfigProvider, tmpdir, tracking_uri, expected_command_segment, docker_example_base_image
 ):  # pylint: disable=unused-argument
@@ -132,11 +130,11 @@ def test_docker_project_tracking_uri_propagation(
 
 
 def test_docker_uri_mode_validation(docker_example_base_image):  # pylint: disable=unused-argument
-    with pytest.raises(ExecutionException):
-        mlflow.projects.run(TEST_DOCKER_PROJECT_DIR, backend="databricks")
+    with pytest.raises(ExecutionException, match="When running on Databricks"):
+        mlflow.projects.run(TEST_DOCKER_PROJECT_DIR, backend="databricks", backend_config={})
 
 
-@mock.patch("mlflow.projects.docker._get_git_commit")
+@mock.patch("mlflow.projects.docker.get_git_commit")
 def test_docker_image_uri_with_git(get_git_commit_mock):
     get_git_commit_mock.return_value = "1234567890"
     image_uri = _get_docker_image_uri("my_project", "my_workdir")
@@ -144,7 +142,7 @@ def test_docker_image_uri_with_git(get_git_commit_mock):
     get_git_commit_mock.assert_called_with("my_workdir")
 
 
-@mock.patch("mlflow.projects.docker._get_git_commit")
+@mock.patch("mlflow.projects.docker.get_git_commit")
 def test_docker_image_uri_no_git(get_git_commit_mock):
     get_git_commit_mock.return_value = None
     image_uri = _get_docker_image_uri("my_project", "my_workdir")
@@ -162,12 +160,12 @@ def test_docker_invalid_project_backend_local():
     work_dir = "./examples/docker"
     project = _project_spec.load_project(work_dir)
     project.name = None
-    with pytest.raises(ExecutionException):
+    with pytest.raises(ExecutionException, match="Project name in MLProject must be specified"):
         mlflow.projects.docker.validate_docker_env(project)
 
 
 @pytest.mark.parametrize(
-    "artifact_uri, host_artifact_uri, container_artifact_uri, should_mount",
+    ("artifact_uri", "host_artifact_uri", "container_artifact_uri", "should_mount"),
     [
         ("/tmp/mlruns/artifacts", "/tmp/mlruns/artifacts", "/tmp/mlruns/artifacts", True),
         ("s3://my_bucket", None, None, False),
@@ -215,7 +213,7 @@ def test_docker_databricks_tracking_cmd_and_envs(ProfileConfigProvider):
 
 
 @pytest.mark.parametrize(
-    "volumes, environment, os_environ, expected",
+    ("volumes", "environment", "os_environ", "expected"),
     [
         ([], ["VAR1"], {"VAR1": "value1"}, [("-e", "VAR1=value1")]),
         ([], ["VAR1"], {}, ["should_crash", ("-e", "VAR1=value1")]),
@@ -253,7 +251,7 @@ def test_docker_user_specified_env_vars(volumes, environment, expected, os_envir
 
     if "should_crash" in expected:
         expected.remove("should_crash")
-        with pytest.raises(MlflowException):
+        with pytest.raises(MlflowException, match="This project expects"):
             with mock.patch.dict("os.environ", os_environ):
                 _get_docker_command(image, active_run, None, volumes, environment)
     else:
@@ -279,3 +277,44 @@ def test_docker_run_args(docker_args):
 
     for flag, value in docker_args.items():
         assert docker_command[docker_command.index(value) - 1] == "--{}".format(flag)
+
+
+def test_docker_build_image_local(tmp_path):
+    client = docker.from_env()
+    dockerfile = tmp_path.joinpath("Dockerfile")
+    dockerfile.write_text(
+        """
+FROM python:3.8
+RUN pip --version
+"""
+    )
+    client.images.build(path=str(tmp_path), dockerfile=str(dockerfile), tag="my-python:latest")
+    tmp_path.joinpath("MLproject").write_text(
+        """
+name: test
+docker_env:
+  image: my-python
+entry_points:
+  main:
+    command: python --version
+"""
+    )
+    submitted_run = mlflow.projects.run(str(tmp_path))
+    run = mlflow.get_run(submitted_run.run_id)
+    assert run.data.tags[MLFLOW_DOCKER_IMAGE_URI] == "my-python"
+
+
+def test_docker_build_image_remote(tmp_path):
+    tmp_path.joinpath("MLproject").write_text(
+        """
+name: test
+docker_env:
+  image: python:3.8
+entry_points:
+  main:
+    command: python --version
+"""
+    )
+    submitted_run = mlflow.projects.run(str(tmp_path))
+    run = mlflow.get_run(submitted_run.run_id)
+    assert run.data.tags[MLFLOW_DOCKER_IMAGE_URI] == "python:3.8"

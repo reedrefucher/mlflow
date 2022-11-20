@@ -13,11 +13,12 @@ import os
 
 import numpy
 import tensorflow
+import pandas
 import yaml
 from packaging.version import Version
 
 import mlflow
-from mlflow import pyfunc
+from mlflow import pyfunc, MlflowException
 from mlflow.models import Model
 from mlflow.models.model import MLMODEL_FILE_NAME
 from mlflow.models.signature import ModelSignature
@@ -49,7 +50,6 @@ def get_default_pip_requirements():
              Calls to :func:`save_model()` and :func:`log_model()` produce a pip environment
              that, at minimum, contains these requirements.
     """
-    import tensorflow as tf
 
     pip_deps = [_get_pinned_requirement("tensorflow")]
 
@@ -57,7 +57,7 @@ def get_default_pip_requirements():
     # https://github.com/tensorflow/tensorflow/blob/v2.6.0/tensorflow/tools/pip_package/setup.py#L106
     # To prevent a different version of keras from being installed by tensorflow when creating
     # a serving environment, add a pinned requirement for keras
-    if Version(tf.__version__) >= Version("2.6.0"):
+    if Version(tensorflow.__version__) >= Version("2.6.0"):
         pip_deps.append(_get_pinned_requirement("keras"))
 
     return pip_deps
@@ -74,21 +74,20 @@ def get_default_conda_env():
 @keyword_only
 @format_docstring(LOG_MODEL_PARAM_DOCS.format(package_name=FLAVOR_NAME))
 def log_model(
-        tflite_model,
-        artifact_path,
-        conda_env=None,
-        registered_model_name=None,
-        signature: ModelSignature = None,
-        input_example: ModelInputExample = None,
-        await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
-        pip_requirements=None,
-        extra_pip_requirements=None,
+    tflite_model,
+    artifact_path,
+    conda_env=None,
+    registered_model_name=None,
+    signature: ModelSignature = None,
+    input_example: ModelInputExample = None,
+    await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
+    pip_requirements=None,
+    extra_pip_requirements=None,
 ):
     """
     Log a Tensorflow lite model as an MLflow artifact for the current run.
-
-    :param tflite_model: tflite_model (a byte form instance of `tensorflow.lite.python.interpreter.Interpreter`_) to be saved.
-
+    :param tflite_model: tflite_model (a byte form instance of
+    `tensorflow.lite.python.interpreter.Interpreter`_) to be saved.
     :param artifact_path: Run-relative artifact path.
     :param conda_env: Either a dictionary representation of a Conda environment or the path to a
                       Conda environment yaml file. If provided, this describes the environment
@@ -152,28 +151,28 @@ def log_model(
 @keyword_only
 @format_docstring(LOG_MODEL_PARAM_DOCS.format(package_name=FLAVOR_NAME))
 def save_model(
-        self,
-        tflite_model,
-        path,
-        conda_env=None,
-        mlflow_model=None,
-        signature: ModelSignature = None,
-        input_example: ModelInputExample = None,
-        pip_requirements=None,
-        extra_pip_requirements=None,
+    self,
+    tflite_model,
+    path,
+    conda_env=None,
+    mlflow_model=None,
+    signature: ModelSignature = None,
+    input_example: ModelInputExample = None,
+    pip_requirements=None,
+    extra_pip_requirements=None,
 ):
     """
     Save an tflite model to a path on the local file system.
 
-    :param tflite_model: tflite_model (a byte form instance of `tensorflow.lite.python.interpreter.Interpreter`_) to be saved.
-    :param path: Local path where the model is to be saved.
-    :param conda_env: Either a dictionary representation of a Conda environment or the path to a
-                      Conda environment yaml file. If provided, this describes the environment
-                      this model should be run in. At minimum, it should specify the dependencies
-                      contained in :func:`get_default_conda_env()`. If ``None``, the default
-                      :func:`get_default_conda_env()` environment is added to the model.
-                      The following is an *example* dictionary representation of a Conda
-                      environment::
+    :param tflite_model: tflite_model (a byte form instance of
+    `tensorflow.lite.python.interpreter.Interpreter`_) to be saved.
+    :param path: Local path where the model is to be saved. :param conda_env: Either a dictionary
+    representation of a Conda environment or the path to a Conda environment yaml file.
+    If provided, this describes the environment this model should be run in.
+    At minimum, it should specify the dependencies contained in
+    :func:`get_default_conda_env()`. If ``None``, the default :func:`get_default_conda_env()`
+    environment is added to the model.
+    The following is an *example* dictionary representation of a Conda environment::
 
                         {
                             'name': 'mlflow-env',
@@ -220,7 +219,7 @@ def save_model(
     model_data_path = os.path.join(path, model_data_subpath)
 
     # Save a tflite model
-    with open(model_data_path, 'wb') as f:
+    with open(model_data_path, "wb") as f:
         f.write(tflite_model)
 
     if conda_env is None:
@@ -229,13 +228,17 @@ def save_model(
             # To ensure `_load_pyfunc` can successfully load the model during the dependency
             # inference, `mlflow_model.save` must be called beforehand to save an MLmodel file.
             inferred_reqs = mlflow.models.infer_pip_requirements(
-                path, FLAVOR_NAME, fallback=default_reqs,
+                path,
+                FLAVOR_NAME,
+                fallback=default_reqs,
             )
             default_reqs = sorted(set(inferred_reqs).union(default_reqs))
         else:
             default_reqs = None
         conda_env, pip_requirements, pip_constraints = _process_pip_requirements(
-            default_reqs, pip_requirements, extra_pip_requirements,
+            default_reqs,
+            pip_requirements,
+            extra_pip_requirements,
         )
     else:
         conda_env, pip_requirements, pip_constraints = _process_conda_env(conda_env)
@@ -250,39 +253,48 @@ def save_model(
     # Save `requirements.txt`
     write_to(os.path.join(path, _REQUIREMENTS_FILE_NAME), "\n".join(pip_requirements))
 
-    mlflow_model.add_flavor(self.FLAVOR_NAME, tf_version=tf.__version__, data=model_data_subpath)
-    pyfunc.add_to_model(mlflow_model, loader_module="mlflow.tflite", data=model_data_subpath, env=_CONDA_ENV_FILE_NAME)
+    mlflow_model.add_flavor(
+        self.FLAVOR_NAME, tf_version=tensorflow.__version__, data=model_data_subpath
+    )
+    pyfunc.add_to_model(
+        mlflow_model,
+        loader_module="mlflow.tflite",
+        data=model_data_subpath,
+        env=_CONDA_ENV_FILE_NAME,
+    )
     mlflow_model.save(os.path.join(path, MLMODEL_FILE_NAME))
 
 
 def load_model(self, model_uri):
     """
-      Load a Tensorflow lite model from a local file or a run.
+    Load a Tensorflow lite model from a local file or a run.
 
-      :param model_uri: The location, in URI format, of the MLflow model. For example:
+    :param model_uri: The location, in URI format, of the MLflow model. For example:
 
-                        - ``/Users/me/path/to/local/model``
-                        - ``relative/path/to/local/model``
-                        - ``s3://my_bucket/path/to/model``
-                        - ``runs:/<mlflow_run_id>/run-relative/path/to/model``
+                      - ``/Users/me/path/to/local/model``
+                      - ``relative/path/to/local/model``
+                      - ``s3://my_bucket/path/to/model``
+                      - ``runs:/<mlflow_run_id>/run-relative/path/to/model``
 
-                        For more information about supported URI schemes, see
-                        `Referencing Artifacts <https://www.mlflow.org/docs/latest/tracking.html#
-                        artifact-locations>`_.
+                      For more information about supported URI schemes, see
+                      `Referencing Artifacts <https://www.mlflow.org/docs/latest/tracking.html#
+                      artifact-locations>`_.
 
-      :return: An TFLite model (an instance of `tensorflow.lite.python.interpreter.Interpreter`_)
+    :return: An TFLite model (an instance of `tensorflow.lite.python.interpreter.Interpreter`_)
     """
     local_model_path = _download_artifact_from_uri(artifact_uri=model_uri)
-    flavor_conf = _get_flavor_configuration(model_path=local_model_path, flavor_name=self.FLAVOR_NAME)
+    flavor_conf = _get_flavor_configuration(
+        model_path=local_model_path, flavor_name=self.FLAVOR_NAME
+    )
     tflite_model_file_path = os.path.join(local_model_path, flavor_conf.get("data", "model.tflite"))
-    return _load_model(path=tflite_model_file_path)
+    return _load_model(model_path=tflite_model_file_path)
 
 
 def _load_model(model_path):
     """
-    Load a specified TensorFlow model from model path and return instance of tensorflow.lite.Interpreter
+    Load a specified TensorFlow model from model path and return instance of
+    tensorflow.lite.Interpreter
     """
-    import tensorflow
     interpreter = tensorflow.lite.Interpreter(model_path=model_path)
     return interpreter
 
@@ -290,40 +302,110 @@ def _load_model(model_path):
 def _load_pyfunc(model_path):
     """
     Load PyFunc implementation. Called by ``pyfunc.load_pyfunc``. This function loads an MLflow
-    model with the TensorFlow Lite flavor into a new tensorflow.lite.Interpreter instance and exposes it behind the
-    ``pyfunc.predict`` interface.
-
+    model with the TensorFlow Lite flavor into a new tensorflow.lite.Interpreter instance
+    and exposes it behind the ``pyfunc.predict`` interface.
     """
     return _TFLiteInterpreterWrapper(model_path=model_path)
 
 
 class _TFLiteInterpreterWrapper(tensorflow.lite.Interpreter):
-    '''
-    Wrapper class that exposes a TensorFlow Lite model for inference via a ``predict`` function such that
-    ``predict(data: numpy.array) -> numpy.array``.
-    '''
+    """
+    Wrapper class that exposes a TensorFlow Lite model for inference via a ``predict`` function
+    such that:
+        ``predict(data: numpy.array) -> numpy.array``.
+        ``predict(data: dict) -> numpy.array``.
+        ``predict(data: pandas.core.frame.DataFrame) -> numpy.array``.
+    """
 
     def __init__(self, model_path=None, model_content=None, **kwargs):
-        super(_TFLiteInterpreterWrapper, self).__init__(model_path, model_content, **kwargs)
+        super().__init__(model_path, model_content, **kwargs)
         self.allocate_tensors()
-        input_details = self.get_input_details()
-        output_details = self.get_output_details()
-        self.input_index = input_details[0]['index']
-        self.output_index = output_details[0]['index']
+        self.inputs = [
+            (inp["name"], inp["dtype"], inp["shape"], inp["index"])
+            for inp in self.get_input_details()
+        ]
+        self.outputs = [
+            (outp["name"], outp["dtype"], outp["shape"], outp["index"])
+            for outp in self.get_output_details()
+        ]
+
+    def _cast_input_types(self, feeds):
+        """
+        This helper ensures the data to be cast into expected format for
+        """
+        for input_name, input_type, _, _ in self.inputs:
+            feed = feeds.get(input_name)
+            if feed is not None and feed.dtype != input_type:
+                feeds[input_name] = feed.astype(input_type)
+        return feeds
 
     def predict(self, data):
-        target_shape = self.get_input_details()[0]['shape']
+        """
 
-        if isinstance(data, numpy.ndarray):
-            if (data.shape == target_shape).all():
-                pass
+        :param data: Either a pandas DataFrame, numpy.ndarray or a dictionary.
+
+            Dictionary input is expected to be a valid TFLite model feed dictionary.
+            Numpy array input is supported
+            Pandas DataFrame is converted to TFlite inputs as follows:
+                - If the underlying TFLite model only defines a *single* input tensor, the
+                DataFrame's values are converted to a NumPy array representation using the
+                `DataFrame.values()
+                <https://pandas.pydata.org/pandas-docs/stable/reference/api/
+                 pandas.DataFrame.values.html#pandas.DataFrame.values>`_ method.
+                 - If the underlying TFlite model defines *multiple* input tensors, each column
+                 of the DataFrame is converted to a NumPy array representation.
+
+
+        :return: Model predictions in NumPy array representation
+
+        """
+
+        if isinstance(data, dict):
+            feed_dict = data
+        elif isinstance(data, numpy.ndarray):
+            # NB: We do allow scoring with a single tensor (ndarray) in order to be compatible with
+            # supported pyfunc inputs iff the model has a single input. The passed tensor is
+            # assumed to be the first input.
+            if len(self.inputs) != 1:
+                inputs = [x[0] for x in self.inputs]
+                raise MlflowException(
+                    "Unable to map numpy array input to the expected model"
+                    "input. "
+                    "Numpy arrays can only be used as input for MLflow Tflite"
+                    "models that have a single input. This model requires "
+                    "{0} inputs. Please pass in data as either a "
+                    "dictionary or a DataFrame with the following tensors"
+                    ": {1}.".format(len(self.inputs), inputs)
+                )
+            feed_dict = {self.inputs[0][0]: data}
+
+        elif isinstance(data, pandas.DataFrame):
+            if len(self.inputs) > 1:
+                feed_dict = {name: data[[name]].values for (name, _, _, _) in self.inputs}
             else:
-                raise ValueError(
-                    "The input shape is {0} while the expected input shape is {1}.".format(data.shape, target_shape))
-        else:
-            raise TypeError("Only numpy input type is supported")
+                feed_dict = {self.inputs[0][0]: data.values}
 
-        self.set_tensor(self.input_index, data)
-        self.invoke()
-        output_data = self.get_tensor(self.output_index)
-        return (output_data)
+        else:
+            raise TypeError(
+                "Input should be a dictionary or a numpy array or a pandas.DataFrame,"
+                "got '{}'".format(type(data))
+            )
+
+        feed_dict = self._cast_input_types(feed_dict)
+
+        # return(feed_dict)
+
+        if len(self.inputs) > 1:
+            assert len({inp.shape[0] for inp in feed_dict.values()}) == 1, (
+                "provided inputs have different batch"
+                "size, please, ensure that batch size"
+                " is equal across different inputs "
+            )
+        output_data = []
+        for i in range(len(feed_dict[self.inputs[0][0]])):
+            for inp in self.inputs:
+                self.set_tensor(inp[3], feed_dict[inp[0]][i : (i + 1)])
+            self.invoke()
+            output_data.extend(self.get_tensor(self.outputs[0][3]))
+
+        return numpy.array(output_data)
